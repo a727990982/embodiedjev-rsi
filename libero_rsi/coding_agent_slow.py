@@ -1,6 +1,6 @@
 """Codex episode-start planner and mid-episode monitor for the LIBERO harness.
 
-Production uses Codex for both planning stages, Astra for perception/identity,
+Production uses Codex CLI for both planning stages and Astra perception/identity,
 and Jev for intent selection. Explicit mode='mock' is available only to offline
 callers/tests; runtime role selection is not controlled by environment switches.
 Plans are episode-local structured data, not generated control code.
@@ -33,6 +33,7 @@ STALL_STEPS = frozenset({
 CODEX_BIN = os.environ.get('CODING_AGENT_CODEX_BIN', 'codex')
 CODEX_MODEL = os.environ.get('CODING_AGENT_CODEX_MODEL', 'gpt-6-astra')
 CODEX_EFFORT = os.environ.get('CODING_AGENT_CODEX_EFFORT', 'high')
+PERCEPTION_MODEL = 'gpt-6-astra'  # model role; invoked through the same Codex CLI transport
 # Optional proxy. Empty (the default) means a direct connection.
 DEFAULT_HTTP_PROXY = os.environ.get('CODING_AGENT_HTTP_PROXY', '').strip()
 DEFAULT_SOCKS = os.environ.get('CODING_AGENT_SOCKS', '').strip()
@@ -378,19 +379,22 @@ def _resolve_codex_bin() -> str:
     raise FileNotFoundError(f'codex_bin_missing:{raw}')
 
 
-def call_codex(prompt: str, image_paths: Sequence[str], *, timeout_s: float = 180.0) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def call_codex(prompt: str, image_paths: Sequence[str], *, timeout_s: float = 180.0,
+               model: Optional[str] = None, effort: Optional[str] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Invoke Codex CLI non-interactively; parse JSON from stdout.
 
     Prompt is always passed on stdin with argv `-` because `-i/--image` is
     variadic and would swallow a trailing prompt string as another image path
     (symptoms: "Reading prompt from stdin... No prompt provided").
     """
+    selected_model = CODEX_MODEL if model is None else model
+    selected_effort = CODEX_EFFORT if effort is None else effort
     bin_path = _resolve_codex_bin()
     cmd = [
         bin_path, 'exec',
         '--skip-git-repo-check',
-        '-m', CODEX_MODEL,
-        '-c', f'model_reasoning_effort="{CODEX_EFFORT}"',
+        '-m', selected_model,
+        '-c', f'model_reasoning_effort="{selected_effort}"',
     ]
     for p in list(image_paths)[:4]:
         if p and Path(p).is_file():
@@ -413,8 +417,8 @@ def call_codex(prompt: str, image_paths: Sequence[str], *, timeout_s: float = 18
     parsed = _extract_json(proc.stdout or out)
     rec = {
         'backend': 'codex',
-        'model': CODEX_MODEL,
-        'effort': CODEX_EFFORT,
+        'model': selected_model,
+        'effort': selected_effort,
         'wall_s': round(wall, 3),
         'cost_usd': 0.0,  # Codex CLI does not always expose; ledger separately if needed
         'returncode': proc.returncode,
@@ -548,6 +552,225 @@ def prepare_slow_context(
 
 def harness_call_from_slow(*, mode: Optional[str] = None, **kwargs):
     return call_monitor(prepare_slow_context(**kwargs), mode=mode)
+
+
+# Astra visual perception through Codex CLI; mock fixtures are offline only.
+PERCEIVE_PROMPT = """You are the perception module of a single Franka arm with a parallel gripper (top-down grasps).
+Task instruction (language goal): "{lang}"
+Image size: {img_size}x{img_size} px from a fixed front (agentview) camera; robot base at the TOP of the image. Pixel v grows downward.
+Optional extra stills may show the wrist camera — pixel coordinates ALWAYS refer to the FRONT agentview image only.
+
+IDENTITY FIRST (do this before locking any keypoints):
+- Read the language goal and NAME the object that must be moved and the place region, using only what the instruction says plus what you see.
+- If several similar cans/bottles/boxes are visible, pick the one that best matches the language phrase; if you cannot tell, set matched_language_goal to null.
+- grasp_px / object_center_px MUST lie on THAT language-goal object only. place_px MUST lie on the language-goal place region only. Never lock points on a neighbour.
+
+Phase / context: {phase}
+{extra_context}
+
+Reply ONLY one JSON object (no markdown fences):
+{{
+  "goal_object_named": short name of the language-goal object,
+  "goal_object_where": one short phrase locating that object in THIS image (or "not visible"),
+  "place_region_named": short name of the place region,
+  "place_region_where": one short phrase locating that place region (or "not visible"),
+  "matched_language_goal": true if grasp/object_center are on the language-goal object AND place_px on the place region; false if wrong; null if unsure,
+  "grasp_px": [u, v],
+  "grasp_yaw_deg": gripper rotation about vertical (-90..90; 0 = fingers close along image left-right),
+  "grasp_depth_m": how far below that visible point the fingertips should go (0.00-0.06),
+  "object_center_px": [u, v],
+  "object_height_m": height estimate,
+  "object_width_m": width across the gripper fingers,
+  "place_px": [u, v],
+  "place_clearance_m": height above place point to release (0.00-0.10),
+  "object_held_by_gripper": true/false,
+  "confidence": 0..1
+}}
+
+Uncertain ≠ proceed: never claim matched_language_goal=true when unsure.
+"""
+
+
+def _as_px(val: Any, img_size: int, errs: List[str], name: str) -> Optional[List[float]]:
+    if not isinstance(val, (list, tuple)) or len(val) < 2:
+        errs.append(f'{name}_missing')
+        return None
+    try:
+        u, v = float(val[0]), float(val[1])
+    except (TypeError, ValueError):
+        errs.append(f'{name}_bad')
+        return None
+    if not (0 <= u < img_size and 0 <= v < img_size):
+        errs.append(f'{name}_oob')
+    return [u, v]
+
+
+def validate_keypoints(parsed: Dict[str, Any], *, img_size: int = 512) -> Tuple[bool, List[str], Dict[str, Any]]:
+    """Normalize Astra-shaped keypoint JSON so _commit_keypoints path works."""
+    errs: List[str] = []
+    out = dict(parsed or {})
+    for name in ('grasp_px', 'object_center_px', 'place_px'):
+        px = _as_px(out.get(name), img_size, errs, name)
+        if px is not None:
+            out[name] = px
+    if out.get('object_center_px') is None and out.get('grasp_px') is not None:
+        out['object_center_px'] = list(out['grasp_px'])
+    for k, lo, hi, default in (
+        ('grasp_yaw_deg', -90.0, 90.0, 0.0),
+        ('grasp_depth_m', 0.0, 0.06, 0.02),
+        ('object_height_m', 0.005, 0.2, 0.03),
+        ('object_width_m', 0.01, 0.2, 0.05),
+        ('place_clearance_m', 0.0, 0.10, 0.04),
+        ('confidence', 0.0, 1.0, 0.5),
+    ):
+        if k not in out or out[k] is None:
+            out[k] = default
+            continue
+        try:
+            out[k] = float(out[k])
+            if out[k] < lo or out[k] > hi:
+                out[k] = float(max(lo, min(hi, out[k])))
+        except (TypeError, ValueError):
+            errs.append(f'{k}_bad')
+            out[k] = default
+    m = out.get('matched_language_goal')
+    if m is True or str(m).lower() == 'true':
+        out['matched_language_goal'] = True
+    elif m is False or str(m).lower() == 'false':
+        out['matched_language_goal'] = False
+    else:
+        out['matched_language_goal'] = None
+    held = out.get('object_held_by_gripper')
+    out['object_held_by_gripper'] = held is True or str(held).lower() == 'true'
+    for k in ('goal_object_named', 'goal_object_where', 'place_region_named', 'place_region_where'):
+        if k not in out or out[k] is None:
+            out[k] = 'unknown'
+        else:
+            out[k] = str(out[k])[:120]
+    hard = [e for e in errs if e.endswith('_missing') or e.endswith('_bad') or e.endswith('_oob')]
+    # grasp_px missing/bad is fatal; oob is soft-warn but still reject for safety
+    ok = out.get('grasp_px') is not None and out.get('place_px') is not None
+    ok = ok and not any(e.startswith('grasp_px_') or e.startswith('place_px_') for e in hard)
+    return ok, errs, out
+
+
+def mock_perceive(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Deterministic keypoints for smoke (cream-ish layout from prior LIBERO agentview)."""
+    lang = str(ctx.get('language_goal') or '').lower()
+    phase = str(ctx.get('phase') or 'perceive_start')
+    # Default cream cheese → basket layout (approx. from prior Astra perceive_start)
+    grasp = [196.0, 310.0]
+    place = [416.0, 243.0]
+    named = 'cream cheese'
+    place_named = 'basket'
+    if 'ketchup' in lang:
+        grasp, named = [280.0, 300.0], 'ketchup'
+    elif 'butter' in lang:
+        grasp, named = [340.0, 280.0], 'butter'
+    elif 'soup' in lang or 'alphabet' in lang:
+        grasp, named = [150.0, 340.0], 'alphabet soup'
+    matched = True
+    if 'unmatched' in phase or 'force_null' in str(ctx.get('extra_context') or ''):
+        matched = None
+    return {
+        'goal_object_named': named,
+        'goal_object_where': f'{named} on the table near image centre',
+        'place_region_named': place_named,
+        'place_region_where': f'{place_named} toward image right',
+        'matched_language_goal': matched,
+        'grasp_px': grasp,
+        'grasp_yaw_deg': 5.0,
+        'grasp_depth_m': 0.015,
+        'object_center_px': list(grasp),
+        'object_height_m': 0.025,
+        'object_width_m': 0.06,
+        'place_px': place,
+        'place_clearance_m': 0.04,
+        'object_held_by_gripper': False,
+        'confidence': 0.85,
+    }
+
+
+def build_perceive_prompt(ctx: Dict[str, Any]) -> str:
+    extra = ctx.get('extra_context') or ''
+    if extra:
+        extra = f'Context (current robot state / why you are asked again): {extra}'
+    return PERCEIVE_PROMPT.format(
+        lang=ctx.get('language_goal') or '',
+        img_size=int(ctx.get('img_size') or 512),
+        phase=ctx.get('phase') or 'perceive_start',
+        extra_context=extra,
+    )
+
+
+def call_perceive(
+    ctx: Dict[str, Any],
+    *,
+    mode: Optional[str] = None,
+    image_paths: Optional[Sequence[str]] = None,
+    timeout_s: float = 180.0,
+    effort: Optional[str] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Run perceive backend; return (normalized_keypoints, rec)."""
+    mode = backend_mode(mode)
+    img_size = int(ctx.get('img_size') or 512)
+    images = list(image_paths or ctx.get('image_paths') or [])[:4]
+    if mode == 'mock':
+        raw = mock_perceive(ctx)
+        ok, errs, norm = validate_keypoints(raw, img_size=img_size)
+        rec = {
+            'backend': 'mock',
+            'wall_s': 0.0,
+            'cost_usd': 0.0,
+            'validate_ok': ok,
+            'validate_errs': errs,
+            'phase': ctx.get('phase'),
+        }
+        if not ok:
+            raise ValueError(f'mock_perceive_invalid:{errs}')
+        return norm, rec
+    if mode == 'codex':
+        prompt = build_perceive_prompt(ctx)
+        raw, rec = call_codex(prompt, images, timeout_s=timeout_s, model=PERCEPTION_MODEL, effort=effort)
+        ok, errs, norm = validate_keypoints(raw, img_size=img_size)
+        rec = dict(rec)
+        rec['validate_ok'] = ok
+        rec['validate_errs'] = errs
+        rec['phase'] = ctx.get('phase')
+        rec['backend'] = 'codex_perceive'
+        if not ok:
+            raise ValueError(f'codex_perceive_invalid:{errs}')
+        return norm, rec
+    raise RuntimeError(f'unknown_perceive_mode:{mode}')
+
+
+def harness_call_perceive(
+    *,
+    lang: str,
+    phase: str,
+    image_paths: Sequence[str],
+    context: Optional[str] = None,
+    img_size: int = 512,
+    mode: Optional[str] = None,
+    effort: Optional[str] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Astra perception through Codex CLI for episode start and every relook."""
+    ctx = {
+        'language_goal': lang,
+        'phase': phase,
+        'extra_context': context or '',
+        'img_size': img_size,
+        'image_paths': list(image_paths)[:4],
+    }
+    return call_perceive(ctx, mode=mode, image_paths=image_paths, effort=effort)
+
+
+def call_identity_check(prompt: str, image_paths: Sequence[str], *, effort: Optional[str] = None):
+    """Verify a marked grasp pixel with Astra through Codex CLI."""
+    parsed, rec = call_codex(prompt, image_paths, model=PERCEPTION_MODEL, effort=effort)
+    rec = dict(rec)
+    rec['backend'] = 'codex_identity'
+    return parsed, rec
 
 
 # ---------------------------------------------------------------------------

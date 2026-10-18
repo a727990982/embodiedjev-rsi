@@ -4,8 +4,8 @@ Public snapshot of the LIBERO RSI / EmbodiedJev harness. This repo had no prior 
 
 | Path | Role |
 |---|---|
-| `libero_rsi/coding_agent_slow.py` | Codex episode-start planning and mid-episode slow-think via `codex exec`; explicit mock calls for offline tests. |
-| `libero_rsi/run_ep_fbpatch.py` | Episode harness: Jev intents, stall feedback, grasp confirm, local-deadend relook, place force-release. Needs LIBERO, MuJoCo, and the Astra/Jev clients to actually roll out. |
+| `libero_rsi/coding_agent_slow.py` | Codex CLI transport for start planning, slow-think, Astra perception and identity checks; explicit mock calls for offline tests. |
+| `libero_rsi/run_ep_fbpatch.py` | Episode harness: Jev intents, stall feedback, grasp confirm, local-deadend relook, place force-release. Needs LIBERO, MuJoCo, Codex CLI, and the Jev client to actually roll out. |
 | `libero_rsi/jev_experience.py` | Builds `experience_brief` (recoveries, lessons, and the start-plan prior) for Jev. |
 | `libero_rsi/validate.py` | Library validator. Imports sibling `dsl_libero.py`. |
 | `libero_rsi/dsl_libero.py` | Expression DSL and dimensional checks used by the validator and logic smokes. |
@@ -41,23 +41,23 @@ During place, consecutive `lower_to_place` stalls (`MAX_PLACE_LOWER_STALL`, defa
 
 ## Fixed model roles
 
-| Role | Backend |
-|---|---|
-| Episode-start planning and sync/async slow-think | Codex CLI |
-| Visual perception, keypoints and identity verification | Astra |
-| Per-step intent selection and spectator decision | Jev |
+| Role | Model | Invocation |
+|---|---|---|
+| Episode-start planning and sync/async slow-think | `CODING_AGENT_CODEX_MODEL` (default `gpt-6-astra`) | Codex CLI |
+| Visual perception, keypoints and identity verification | Astra (`gpt-6-astra`) | Codex CLI |
+| Per-step intent selection and spectator decision | Jev | `jev_choice.choose` |
 
-The harness has no dual/comparison mode, Astra planning backend, or Codex perception backend. The former `CODING_AGENT_SLOW`, `EPISODE_START_PLAN`, and `CODING_AGENT_PERCEIVE` role switches are no longer read. `mode='mock'` remains available only when explicitly calling the standalone planning helpers in offline tests.
+Codex is the invocation mechanism; Astra is the visual model. Perception and marked-grasp identity verification both use `codex exec -m gpt-6-astra`. There is no dual/comparison mode or direct Astra-client transport. The former `CODING_AGENT_SLOW`, `EPISODE_START_PLAN`, and `CODING_AGENT_PERCEIVE` role switches are no longer read. `mode='mock'` remains available only when explicitly calling the standalone planning/perception helpers in offline tests.
 
-Early recovery now refreshes perception through Astra and then calls Codex to plan. Codex failures are recorded; they do not switch the planning role to Astra. The existing `ask_astra`, `consult_astra`, and `defer_to_astra` intent labels are retained for the shipped libraries and logs, but their help path invokes Codex planning.
+Early recovery refreshes perception with Astra through Codex CLI, then requests Codex planning. CLI failures do not switch to a direct Astra client or to mock results. The existing `ask_astra`, `consult_astra`, and `defer_to_astra` intent labels are retained for the shipped libraries and logs, but their help path invokes Codex planning.
 
-Codex looks up `codex` on `PATH`, or `CODING_AGENT_CODEX_BIN`. A proxy is used only when `CODING_AGENT_HTTP_PROXY` or `CODING_AGENT_SOCKS` is set. Do not commit proxy URLs, keys, or host details.
+Codex looks up `codex` on `PATH`, or `CODING_AGENT_CODEX_BIN`. Planning uses `CODING_AGENT_CODEX_MODEL` and `CODING_AGENT_CODEX_EFFORT`; vision uses `gpt-6-astra` with `ASTRA_EFFORT` (default `xhigh`). A proxy is used only when `CODING_AGENT_HTTP_PROXY` or `CODING_AGENT_SOCKS` is set. Do not commit proxy URLs, keys, or host details.
 
 Async slow-think captures a detached copy of policy state and a unique image before starting its worker. Workers return results and log events in private job boxes; the main thread writes the decision log. Simulator diagnostic files are never passed to the coding monitor, including when `DIAG` is enabled.
 
 ## Running an episode
 
-This snapshot does **not** include `astra_client` or `jev_choice`. Actual rollouts require those external clients, LIBERO with its assets, MuJoCo/robosuite, and rendering dependencies. The client interfaces and policy/diagnostic boundary are documented in [libero_rsi/ADAPTER.md](libero_rsi/ADAPTER.md). Offline mock tests do not replace the clients required by the full harness.
+This snapshot does **not** include `jev_choice`. Actual rollouts require that external Jev client, an authenticated Codex CLI, LIBERO with its assets, MuJoCo/robosuite, and rendering dependencies. `astra_client` is no longer needed. The client interfaces and policy/diagnostic boundary are documented in [libero_rsi/ADAPTER.md](libero_rsi/ADAPTER.md). Offline mock tests do not replace the services required by the full harness.
 
 Once the external dependencies are installed:
 
@@ -69,7 +69,7 @@ Libraries are validated before environment creation. Recovery-rule errors are lo
 
 ## Smoke tests
 
-From the repo root (Python 3; `numpy` for the tests that import it):
+From the repo root (Python 3; `numpy` and Pillow for the tests that import them):
 
 ```bash
 failed=0
@@ -79,7 +79,7 @@ done
 test "$failed" -eq 0
 ```
 
-Each test adds `libero_rsi/` to `sys.path`, so `validate` and `dsl_libero` resolve as siblings. `numpy` is required for the tests that import it. No simulator and no network.
+Each test adds `libero_rsi/` to `sys.path`, so `validate` and `dsl_libero` resolve as siblings. NumPy and Pillow are required for the tests that import them. No simulator and no network.
 
 The regression suite executes selected production functions with environment/model doubles, covering identity authorization, observed versus prior clutter, fixed backend routing and Codex failure handling, event timestamps, async snapshots, diagnostic isolation, recovery failures, and validation of every shipped library. These tests do not establish simulation success.
 

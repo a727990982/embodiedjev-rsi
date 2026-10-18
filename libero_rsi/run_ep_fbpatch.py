@@ -16,7 +16,7 @@ Policy-visible signals (documented in ADAPTER.md):
 No simulator object/target ground-truth poses reach the policy.
 Jev state includes experience_brief: short actionable recoveries (when→prefer) + relevant lessons (when→instead), not a full prose dump; general triggers only.
 Codex planning help: the existing ask_astra/consult_astra intent names request Codex; hard rules and a spectator Jev may request synchronous help on distress signals; all share MAX_SLOW.
-Codex handles episode-start global planning and sync/async slow-think. Astra handles visual perception and identity verification; Jev selects each intent. Model roles are fixed.
+Codex handles episode-start global planning and sync/async slow-think. Astra, invoked through Codex CLI, handles visual perception and identity verification; Jev selects each intent. Model roles are fixed.
 Plan JSON is persisted as start_plan.json; mid-episode slow-think fine-tunes the episode plan.
 After close_gripper: proprio+lift grasp confirm (log grasp_confirm); secured → lift, suppress push_aside/local_deadend undo.
 Hard local-deadend rule: repeated local stall family (push_aside/clear_reapproach/raise_redescend/lateral) without progress, or push_aside episode/approach cap → retreat + global front relook + SYNCHRONOUS slow-think replan (Codex slow-think); Jev motion held until plan applied.
@@ -27,7 +27,7 @@ import os, sys, json, time, gc, re, threading, queue
 os.environ.setdefault('MUJOCO_GL', 'egl'); os.environ.setdefault('PYOPENGL_PLATFORM', 'egl')
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
-# Optional neighbors from a larger bench checkout (astra_client, dsl_libero, jev_choice).
+# Optional Jev client from a larger bench checkout.
 for _extra in (
     os.path.join(_HERE, 'bench_common'),
     os.path.abspath(os.path.join(_HERE, '..', '..', 'bench', 'common')),
@@ -36,9 +36,9 @@ for _extra in (
         sys.path.insert(0, _extra)
 import numpy as np
 try:
-    import astra_client as AC, jev_choice as JC
+    import jev_choice as JC
 except ModuleNotFoundError as ex:
-    if ex.name not in ('astra_client', 'jev_choice'):
+    if ex.name != 'jev_choice':
         raise
     raise SystemExit(f'Missing external client {ex.name}. See libero_rsi/ADAPTER.md; '
                      'provide the bench clients via PYTHONPATH or libero_rsi/bench_common/.') from ex
@@ -65,7 +65,7 @@ MAX_PLACE_LOWER_STALL = int(os.environ.get('MAX_PLACE_LOWER_STALL', '3'))  # con
 MAX_PLACE_LIFT_LOWER_CYCLES = int(os.environ.get('MAX_PLACE_LIFT_LOWER_CYCLES', '2'))  # lift↔lower thrash cap during place
 PLACE_XY_M = float(os.environ.get('PLACE_XY_M', '0.04'))  # held-object XY near place → allow force release
 PLACE_CLEARANCE_DEFAULT = float(os.environ.get('PLACE_CLEARANCE_DEFAULT', '0.05'))  # default place_clearance_m if Astra omits
-ASTRA_EFFORT = os.environ.get('ASTRA_EFFORT', 'xhigh')  # perceive/relook/slow/fallback Astra reasoning effort
+ASTRA_EFFORT = os.environ.get('ASTRA_EFFORT', 'xhigh')  # Astra perception/identity effort through Codex CLI
 SLOW_MIN_GAP_S = float(os.environ.get('SLOW_MIN_GAP_S', '5'))  # skip if last Astra call was more recent (unless fallback)
 STAGE_FAIL_N = int(os.environ.get('STAGE_FAIL_N', '3'))  # consecutive timeout/stall + unchanged gripper -> sync slow-think
 FAIL_RESULTS = frozenset({'timeout', 'stalled'})
@@ -186,28 +186,6 @@ def bp(uv, dep):
     u, v = int(np.clip(round(uv[0]), 2, S - 3)), int(np.clip(round(uv[1]), 2, S - 3))
     d = float(np.median(dep[v - 2:v + 3, u - 2:u + 3])); return CP + RM @ np.array([(uv[0] - S / 2) / F, -(uv[1] - S / 2) / F, -1.0]) * d
 
-PERC_PROMPT = f'''You are the perception module of a single Franka arm with a parallel gripper (top-down grasps).
-Task instruction (language goal): "{LANG}"
-Image: {S}x{S} px from a fixed front camera; robot base at the TOP of the image. Pixel v grows downward.
-IDENTITY FIRST (do this before locking any keypoints):
-- Read the language goal and NAME the object that must be moved and the place region, using only what the instruction says plus what you see (no memorized product look-up).
-- If several similar cans/bottles/boxes are visible, pick the one that best matches the language phrase; if you cannot tell, set matched_language_goal to null.
-- grasp_px / object_center_px MUST lie on THAT language-goal object only. place_px MUST lie on the language-goal place region only. Never lock points on a neighbour.
-Reply ONLY JSON with:
-{{"goal_object_named": short name of the language-goal object as you read it from the instruction + image (e.g. the can/bottle/box the instruction asks to move),
- "goal_object_where": one short phrase locating that object in THIS image (or "not visible"),
- "place_region_named": short name of the place region from the instruction + image,
- "place_region_where": one short phrase locating that place region (or "not visible"),
- "matched_language_goal": true if grasp/object_center keypoints are on the language-goal object AND place_px is on the language-goal place region; false if you locked a different object/region; null if unsure,
- "grasp_px":[u,v] (visible point a top-down gripper should pinch on the LANGUAGE-GOAL object: bowl RIM edge, bottle/can body, box centre),
- "grasp_yaw_deg": gripper rotation about vertical (0 = fingers close along image left-right; -90..90),
- "grasp_depth_m": how far below that visible point the fingertips should go (0.00-0.06),
- "object_center_px":[u,v] (centre of the LANGUAGE-GOAL object's top), "object_height_m": its height estimate, "object_width_m": its width across the gripper fingers,
- "place_px":[u,v] (visible point at the CENTRE of the LANGUAGE-GOAL target region: inside/bottom-centre of a basket/container, centre of a plate),
- "place_clearance_m": height above that point at which the held object's bottom should be released (0.00-0.10),
- "object_held_by_gripper": true/false (is the LANGUAGE-GOAL object currently between the closed fingers and off the table?),
- "confidence":0..1}}
-If matched_language_goal is false or null, still give your best keypoints on what you believe is the goal object, but set matched_language_goal honestly so a relook can be forced. Uncertain ≠ proceed: never claim a match when unsure — the policy will REFUSE to close until matched_language_goal is true.'''
 P = {'astra_cost': 0.0, 'astra_calls': 0, 'relook': 0, 'fb': 0, 'slow': 0, 'last_astra_wall': 0.0}
 ID_EVENTS = []  # identity checks at start / relook / fallback (policy-visible reflection evidence)
 def identity_fields(p):
@@ -232,12 +210,25 @@ def set_goal_id(confirmed, source, detail=None):
 def goal_id_confirmed():
     return GOAL_ID.get('confirmed') is True
 def perceive(context=None, phase=None):
-    """Astra visual perception for episode start and all relooks."""
+    """Use Codex CLI to ask Astra for visual keypoints at start and on relook."""
+    import coding_agent_slow as CAS
+    from PIL import Image as _PILImage
     rgb, dep = rgbd()
-    prompt = PERC_PROMPT + (f'\nContext (current robot state / why you are asked again): {context}' if context else '')
     ph = phase or ('perceive' if not context else 'relook')
-    parsed, rec = AC.call(AC.to_jpeg(rgb), prompt, {**META, 'phase': ph}, effort=ASTRA_EFFORT)
+    frame = os.path.join(ep_dir, f'perc_{ph}_{P["astra_calls"]}.jpg')
+    _PILImage.fromarray(rgb).save(frame)
+    images = [frame]
+    wrist = obs.get('robot0_eye_in_hand_image')
+    if wrist is not None:
+        wrist_frame = os.path.join(ep_dir, f'perc_{ph}_{P["astra_calls"]}_wrist.jpg')
+        _PILImage.fromarray(wrist[::-1]).save(wrist_frame)
+        images.append(wrist_frame)
+    parsed, rec = CAS.harness_call_perceive(
+        lang=LANG, phase=ph, image_paths=images, context=context,
+        img_size=S, mode='codex', effort=ASTRA_EFFORT)
     P['astra_cost'] += rec['cost_usd']; P['astra_calls'] += 1; P['last_astra_wall'] = time.time()
+    log(t=T[0], perception=True, phase=ph, backend=rec.get('backend'),
+        model=rec.get('model'), effort=rec.get('effort'), wall_s=rec.get('wall_s'))
     return parsed, rgb, dep
 
 from PIL import Image
@@ -385,7 +376,7 @@ def set_perc(p, dep, held_now=False):
     PER['identity'] = identity_fields(p)
 
 def verify_grasp_identity(p, rgb, phase='perceive_start_verify'):
-    """Mark grasp_px on the image and ask Astra whether THAT marked body is the language-goal object.
+    """Mark grasp_px and ask Astra through Codex CLI whether THAT marked body is the language-goal object.
     Catches over-confident wrong locks (claimed match but pixel on a neighbour). No appearance hard-coding."""
     from PIL import ImageDraw as _ID
     im = Image.fromarray(rgb.copy()); d = _ID.Draw(im)
@@ -401,7 +392,12 @@ def verify_grasp_identity(p, rgb, phase='perceive_start_verify'):
               f' "is_language_goal_object": true if that marked body IS the object the instruction asks to move, false if it is a different object, null if unsure,\n'
               f' "language_goal_where_if_different": if false/null, where the true language-goal object is in this image (or "not visible"), else null,\n'
               f' "reason": one short sentence}}\nReply ONLY JSON.')
-    parsed, rec = AC.call(AC.to_jpeg(np.asarray(im)), prompt, {**META, 'phase': phase}, effort=ASTRA_EFFORT)
+    import coding_agent_slow as CAS
+    frame = os.path.join(ep_dir, f'identity_{phase}_{P["astra_calls"]}.jpg')
+    im.save(frame)
+    parsed, rec = CAS.call_identity_check(prompt, [frame], effort=ASTRA_EFFORT)
+    log(t=T[0], identity_verification=True, phase=phase, backend=rec.get('backend'),
+        model=rec.get('model'), effort=rec.get('effort'), wall_s=rec.get('wall_s'))
     P['astra_cost'] += rec['cost_usd']; P['astra_calls'] += 1; P['last_astra_wall'] = time.time()
     return parsed, np.asarray(im)
 
@@ -1020,8 +1016,6 @@ def _global_front_relook(reason):
             pass
         detail.update(matched=matched, phase=phase, tag=tag, identity=idf)
         return detail, dep
-    except AC.CapReached:
-        raise
     except Exception as ex:
         detail['error'] = str(ex)[:300]
         return detail, None
@@ -1086,8 +1080,6 @@ def _local_deadend_global_relook_sync_slow(reason, ns=None):
                 _apply_stall_feedback(ns_fb, f'{crit}:fallback_raise', action='raise_redescend')
             except Exception as ex:
                 detail['fallback_raise_error'] = str(ex)[:200]
-    except AC.CapReached:
-        raise
     except NameError:
         # _sync_slow not yet bound (should not happen at runtime) — still force re-approach
         EP['force_next_intent'] = 'move_above_object'
@@ -1538,8 +1530,6 @@ def _escape_look(reason):
         set_goal_id(matched, 'escape_look', idf)
         Image.fromarray(rgb).save(os.path.join(ep_dir, f'escape{EP["escape_looks"]}.jpg'))
         return 'escape_looked_matched' if matched else 'escape_looked_unmatched'
-    except AC.CapReached:
-        raise
     except Exception as e:
         return f'escape_look_error:{e}'
 
@@ -1637,7 +1627,6 @@ def do_relook(reason):
         set_goal_id(matched, 'relook', idf)
         Image.fromarray(rgb).save(os.path.join(ep_dir, f'relook{P["relook"]}.jpg'))
         return 'relooked_matched' if matched else 'relooked_unmatched'
-    except AC.CapReached: raise
     except Exception as e: return 'relook_error'
 
 def execute(name, ns):
@@ -2244,7 +2233,6 @@ def _poll_async_slow(wait=False, timeout=None):
     parsed, rec = box.get('parsed'), box.get('rec')
     if err is not None:
         _clear_slow_job()
-        if isinstance(err, AC.CapReached): raise err
         return f'async_error:{err}', None
     if stale > SLOW_STALE_INTENTS:
         _account_slow_rec(rec)
@@ -2303,8 +2291,6 @@ def _sync_slow(intent, result, crit):
             issue=parsed.get('issue'), intervene=parsed.get('intervene'),
             plan=parsed.get('plan'), backend=rec.get('backend'))
         return _finish_slow(parsed, rec, dep, both, intent, result, 'sync_codex', crit, dec)
-    except AC.CapReached:
-        raise
     except Exception as e:
         log(t=T[0], coding_agent_slow_error=True, mode='codex', sync=True, err=str(e)[:300])
         return f'sync_error:coding_agent:{e}', None
@@ -2755,7 +2741,6 @@ try:
     if DONE[0]: end = 'success' if stop is None else f'{stop}_then_success'
     else: end = f'{stop}_not_success' if stop else 'horizon'
     res['stopped_at_step'] = t_stop if stop else None
-except AC.CapReached as e: end = 'astra_cap'; res['error'] = str(e)
 except Exception:
     import traceback; end = 'harness_error'; res['error'] = traceback.format_exc()[-1200:]
 # diagnostic: which sim body moved most (never shown to policy)
