@@ -7,6 +7,7 @@ Plans are episode-local structured data, not generated control code.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -131,7 +132,7 @@ def build_prompt(ctx: Dict[str, Any]) -> str:
     return MONITOR_PROMPT.format(
         lang=ctx.get('language_goal') or '',
         issues=' | '.join(sorted(ALLOWED_ISSUES)),
-        context_json=json.dumps(ctx, ensure_ascii=False, indent=2, default=str)[:12000],
+        context_json=json.dumps(ctx, ensure_ascii=False, indent=2, default=str),
     )
 
 
@@ -171,7 +172,10 @@ def validate_intervention(parsed: Dict[str, Any]) -> Tuple[bool, List[str], Dict
         errs.append(f'bad_issue:{issue}')
         issue = 'other'
         out['issue'] = issue
-    intervene = bool(out.get('intervene')) and issue != 'ok'
+    flag = out.get('intervene')
+    if flag not in (True, False, None) and str(flag).lower() not in ('true', 'false'):
+        errs.append('intervene_bad')
+    intervene = (flag is True or str(flag).lower() == 'true') and issue != 'ok'
     out['intervene'] = intervene
     plan = out.get('plan')
     if plan is None:
@@ -194,12 +198,16 @@ def validate_intervention(parsed: Dict[str, Any]) -> Tuple[bool, List[str], Dict
                 if k in st:
                     try:
                         clean[k] = float(st[k])
+                        if not math.isfinite(clean[k]):
+                            raise ValueError('nonfinite')
                     except (TypeError, ValueError):
                         errs.append(f'adjust_{k}_bad')
         if step == 'push_aside':
             if 'blocker_px' in st and isinstance(st['blocker_px'], (list, tuple)) and len(st['blocker_px']) >= 2:
                 try:
                     clean['blocker_px'] = [float(st['blocker_px'][0]), float(st['blocker_px'][1])]
+                    if not all(math.isfinite(x) for x in clean['blocker_px']):
+                        raise ValueError('nonfinite')
                 except (TypeError, ValueError):
                     errs.append('blocker_px_bad')
             if 'direction' in st:
@@ -207,6 +215,8 @@ def validate_intervention(parsed: Dict[str, Any]) -> Tuple[bool, List[str], Dict
             if 'distance_objw' in st:
                 try:
                     clean['distance_objw'] = float(st['distance_objw'])
+                    if not math.isfinite(clean['distance_objw']):
+                        raise ValueError('nonfinite')
                 except (TypeError, ValueError):
                     errs.append('distance_objw_bad')
         norm_plan.append(clean)
@@ -285,8 +295,9 @@ def call_codex(prompt: str, image_paths: Sequence[str], *, timeout_s: float = 18
         '-c', f'model_reasoning_effort="{selected_effort}"',
     ]
     for p in list(image_paths)[:4]:
-        if p and Path(p).is_file():
-            cmd.extend(['-i', str(p)])
+        if not p or not Path(p).is_file():
+            raise FileNotFoundError(f'codex_image_missing:{p}')
+        cmd.extend(['-i', str(p)])
     cmd.append('-')  # read prompt from stdin (safe with variadic -i)
     t0 = time.time()
     proc = subprocess.run(
@@ -299,10 +310,9 @@ def call_codex(prompt: str, image_paths: Sequence[str], *, timeout_s: float = 18
         cwd=str(Path(__file__).resolve().parent),
     )
     wall = time.time() - t0
-    out = (proc.stdout or '') + '\n' + (proc.stderr or '')
-    if proc.returncode != 0 and not proc.stdout:
+    if proc.returncode != 0:
         raise RuntimeError(f'codex_exit_{proc.returncode}:{(proc.stderr or "")[:500]}')
-    parsed = _extract_json(proc.stdout or out)
+    parsed = _extract_json(proc.stdout)
     rec = {
         'backend': 'codex',
         'model': selected_model,
@@ -322,7 +332,7 @@ def call_monitor(
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Run monitor backend; return (normalized_parsed, rec).
 
-    Raises on hard failure; caller may fall back to Astra.
+    Raises on failure; the harness never substitutes another model backend.
     """
     mode = backend_mode(mode)
     prompt = build_prompt(ctx)
@@ -472,6 +482,8 @@ def _as_px(val: Any, img_size: int, errs: List[str], name: str) -> Optional[List
         return None
     try:
         u, v = float(val[0]), float(val[1])
+        if not math.isfinite(u) or not math.isfinite(v):
+            raise ValueError('nonfinite')
     except (TypeError, ValueError):
         errs.append(f'{name}_bad')
         return None
@@ -485,6 +497,8 @@ def validate_keypoints(parsed: Dict[str, Any], *, img_size: int = 512) -> Tuple[
     errs: List[str] = []
     out = dict(parsed or {})
     for name in ('grasp_px', 'object_center_px', 'place_px'):
+        if name == 'object_center_px' and out.get(name) is None:
+            out[name] = out.get('grasp_px')
         px = _as_px(out.get(name), img_size, errs, name)
         if px is not None:
             out[name] = px
@@ -503,6 +517,8 @@ def validate_keypoints(parsed: Dict[str, Any], *, img_size: int = 512) -> Tuple[
             continue
         try:
             out[k] = float(out[k])
+            if not math.isfinite(out[k]):
+                raise ValueError('nonfinite')
             if out[k] < lo or out[k] > hi:
                 out[k] = float(max(lo, min(hi, out[k])))
         except (TypeError, ValueError):
@@ -525,7 +541,7 @@ def validate_keypoints(parsed: Dict[str, Any], *, img_size: int = 512) -> Tuple[
     hard = [e for e in errs if e.endswith('_missing') or e.endswith('_bad') or e.endswith('_oob')]
     # grasp_px missing/bad is fatal; oob is soft-warn but still reject for safety
     ok = out.get('grasp_px') is not None and out.get('place_px') is not None
-    ok = ok and not any(e.startswith('grasp_px_') or e.startswith('place_px_') for e in hard)
+    ok = ok and not hard
     return ok, errs, out
 
 
@@ -702,7 +718,7 @@ def build_start_prompt(ctx: Dict[str, Any]) -> str:
         risks=' | '.join(sorted(ALLOWED_RISKS)),
         step1=' | '.join(sorted(ALLOWED_STEP1)),
         phases=' | '.join(sorted(ALLOWED_PHASES)),
-        context_json=json.dumps(ctx, ensure_ascii=False, indent=2, default=str)[:12000],
+        context_json=json.dumps(ctx, ensure_ascii=False, indent=2, default=str),
     )
 
 
@@ -832,16 +848,13 @@ def validate_start_plan(
             if 'blocked_by_neighbour' not in (out.get('issue') or ''):
                 out['issue'] = 'blocked_by_neighbour'
             errs.append('step1_plan_injected')  # soft
-    hard = [e for e in errs if e.startswith('bad_') or e in (
-        'plan_not_list', 'intervene_without_plan', 'predicted_risks_not_list', 'phase_order_not_list',
-    )]
     # Soft markers ignored for ok
     soft = {
         'step1_plan_injected', 'stall_missing_feedback_step',
         'place_retreat_normalized', 'multi_object_incomplete_phases',
         'multi_object_cycle_stubbed',
     }
-    hard = [e for e in hard if e not in soft]
+    hard = [e for e in errs if e not in soft]
     return (len(hard) == 0), errs, out
 
 

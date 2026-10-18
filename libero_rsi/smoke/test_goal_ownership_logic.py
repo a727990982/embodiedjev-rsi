@@ -1,10 +1,11 @@
 """Logic smoke: single grasp-target ownership (no MuJoCo / Astra).
 Priority: latest relook keypoints > slow-think patch on current target > episode-start.
-Relook overwrites PER and clears PATCH; slow-think mutates the same PATCH; empty relook-only on confirmed stall forbidden.
+Relook overwrites PER and clears PATCH; slow-think mutates the same PATCH; relook requests execute perception.
 """
 import ast
 from pathlib import Path
 import numpy as np
+from test_review_regressions import functions
 
 HARNESS = Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py'
 
@@ -43,32 +44,25 @@ def note_patch_mutation(patch, goal, updates, source):
 
 
 def plan_target_update(id_ok, stallish, has_kp, plan_steps):
-    """Mirror empty-relook forbid + forced target update decision."""
-    done, target_updated = [], False
-    if has_kp:
-        target_updated = True
-    for k in plan_steps:
-        if k == 'relook':
-            if id_ok and stallish and not has_kp:
-                done.append('relook_skipped_empty_confirmed_stall')
-            else:
-                done.append('relook')
-                if has_kp:
-                    target_updated = True
-        elif k in ('adjust', 'raise_redescend', 'lateral_recenter', 'change_approach_yaw',
-                   'confirm_contact', 'clear_reapproach', 'push_aside'):
-            done.append(k); target_updated = True
-    if id_ok and stallish and not target_updated:
-        done.append('forced_stall_feedback:raise_redescend')
-        target_updated = True
-    return done, target_updated
+    calls = []
+    scope = functions('_apply_episode_plan', 'identity_fields', np=np,
+        EP={'closed': False, 'last_result': 'stalled' if stallish else 'reached'},
+        LIB={'intents': []}, PATCH={}, NEIGHBOUR_STALL_ISSUES=set(),
+        goal_id_confirmed=lambda: id_ok, _should_open_on_intervention=lambda **kw: False,
+        do_relook=lambda why: calls.append('perceive') or 'relooked_matched',
+        namespace=lambda: ({}, {}),
+        _apply_stall_feedback=lambda *a, **kw: calls.append('feedback') or {'action': kw.get('action', 'raise_redescend')})
+    plan = {'issue': 'blocked_by_neighbour' if stallish else 'ok', 'matched_language_goal': True,
+            'plan': [{'step': k} for k in plan_steps]}
+    if has_kp: plan['grasp_px'] = [10, 10]
+    return scope['_apply_episode_plan'](plan, None), bool(calls)
 
 
 def main():
     src = HARNESS.read_text()
     # harness wiring present
     for needle in ('_commit_keypoints', '_reset_patch', '_note_patch_mutation', 'GOAL_TARGET',
-                   'forced_target_update', 'relook_skipped_empty_confirmed_stall',
+                   'forced_target_update', "do_relook(f'{source}:plan')",
                    "ASTRA_EFFORT = os.environ.get('ASTRA_EFFORT', 'xhigh')"):
         assert needle in src, needle
     # syntax still valid
@@ -100,28 +94,24 @@ def main():
     g2 = effective_grasp(per, patch)
     assert np.allclose(g2, [0.12, 0.01, 0.06])
 
-    # 4) slow keypoints (= relook priority) also clear previous offsets
+    # 4) perception refresh after a slow request clears previous offsets
     note_patch_mutation(patch, goal, {'grasp_dz_objh': 0.3, 'grasp_dxy_objw': [0.5, 0.0]}, 'stall')
-    commit_keypoints(per, patch, goal, [0.11, 0.0, 0.055], 'slow_keypoints')
+    commit_keypoints(per, patch, goal, [0.11, 0.0, 0.055], 'relook')
     assert goal['source'] == 'relook'
     assert patch['grasp_dz_objh'] == 0.0
     assert patch['grasp_dxy_objw'] == [0.0, 0.0]
 
-    # 5) empty relook-only on confirmed stall → forced target update
+    # 5) A requested relook on a confirmed stall runs real perception.
     done, upd = plan_target_update(id_ok=True, stallish=True, has_kp=False, plan_steps=['relook'])
-    assert 'relook_skipped_empty_confirmed_stall' in done
-    assert any(s.startswith('forced_stall_feedback') for s in done)
-    assert upd is True
+    assert done == ['relook:relooked_matched'] and upd
 
-    # 6) relook-refresh with keypoints on stall counts as target update (allowed)
+    # 6) Planner-supplied pixels request perception instead of overwriting its base.
     done2, upd2 = plan_target_update(id_ok=True, stallish=True, has_kp=True, plan_steps=['relook'])
-    assert 'relook_skipped_empty_confirmed_stall' not in done2
-    assert not any(s.startswith('forced_stall_feedback') for s in done2)
-    assert upd2 is True
+    assert done2 == ['relook:relooked_matched'] and upd2
 
-    # 7) raise/shift without relook also updates target
+    # 7) Relative motion feedback remains executable.
     done3, upd3 = plan_target_update(id_ok=True, stallish=True, has_kp=False, plan_steps=['raise_redescend'])
-    assert upd3 is True and 'raise_redescend' in done3
+    assert upd3 and done3 == ['raise_redescend:raise_redescend']
 
     # 8) one shared effective goal formula (PER + PATCH), not two stores
     note_patch_mutation(patch, goal, {'grasp_dz_objh': 0.1}, 'slow')

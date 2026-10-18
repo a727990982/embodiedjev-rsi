@@ -40,6 +40,10 @@ The start planner cannot elevate the identity gate. An unverified target queues 
 
 `DIAG` writes privileged simulator state, including object poses, for offline analysis. These files and the final diagnostic result are not monitor inputs. The monitor receives only policy decision history, the captured policy state, experience, and captured images.
 
-Each async job owns detached nested state, an image file, and a private result box. The worker never reads live `EP`, `PATCH`, `GOAL_TARGET` or decision files. Only the main thread applies results and writes decision log events. Job IDs reject results belonging to abandoned jobs; the existing decision-age check still governs staleness.
+Each async job owns detached nested state, an image file, and a private result box. The worker never reads live `EP`, `PATCH`, `GOAL_TARGET` or decision files. Only the main thread applies results and writes decision log events. Job IDs reject abandoned jobs. Decision age, target revision, gripper command, close-attempt count, and identity state are checked before applying async advice. Shutdown joins active/orphan CLI calls and harvests their records without applying further actions. Each CLI subprocess has a timeout.
 
 Libraries must pass `validate.py` before a simulator is created. A recovery exception is logged with its rule ID and terminates the episode as `harness_error`; there is no rollback for partially executed robot actions.
+
+The monitor receives the initial plan, current facts and episode lessons. A plan's `relook` step invokes visual perception; keypoints included in a planning reply trigger a visual refresh rather than replacing the perception base directly. Start-planning failures prevent entry into the Jev loop.
+
+The adapter rejects nonzero CLI exit codes even if stdout contains JSON. Missing requested images, malformed/nonfinite geometry, and invalid plan adjustments are errors. Planning calls and visual calls are counted separately; zero cost from the CLI adapter is an unmeasured placeholder.
