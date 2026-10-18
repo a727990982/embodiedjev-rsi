@@ -22,7 +22,7 @@ No `astra_client` module is required. Planning, slow-think, visual perception an
 
 Production roles are fixed: Codex performs start planning and slow-think, Astra via Codex CLI provides visual perception and identity checks, and Jev chooses intents. The old `CODING_AGENT_SLOW`, `EPISODE_START_PLAN`, and `CODING_AGENT_PERCEIVE` environment switches are no longer used. There is no dual mode or direct Astra-client fallback.
 
-Codex requires its CLI and configured authentication. Configure the planning model and effort with `CODING_AGENT_CODEX_MODEL` and `CODING_AGENT_CODEX_EFFORT`, and the executable with `CODING_AGENT_CODEX_BIN`. Perception and marked-grasp identity verification explicitly use `gpt-6-astra` with `ASTRA_EFFORT` (default `xhigh`), independently of the planning-model override. Explicit `mode='mock'` calls remain available in standalone planning/perception helpers for offline tests; mock results do not provide visual evidence.
+Codex requires its CLI and configured authentication. Configure the planning model and effort with `CODING_AGENT_CODEX_MODEL` and `CODING_AGENT_CODEX_EFFORT`, and the executable with `CODING_AGENT_CODEX_BIN`. Perception and marked-grasp identity verification explicitly use `gpt-6-astra` with `ASTRA_EFFORT` (default `xhigh`), independently of the planning-model override. There is no mock backend. Offline tests inject fixed replies at the CLI boundary; they do not demonstrate visual capability.
 
 For early recovery the harness abandons pending advice, refreshes keypoints/identity using Astra through Codex CLI, and calls synchronous Codex planning. A perception failure stops that recovery attempt; a Codex failure is recorded without invoking a separate client or substituting a mock result. Existing help-intent labels (`ask_astra`, `consult_astra`, `defer_to_astra`) keep their names in libraries/logs but route to Codex planning.
 
@@ -34,7 +34,7 @@ For early recovery the harness abandons pending advice, refreshes keypoints/iden
 - Official binary success, which terminates the episode.
 - Library predicates, recoveries and qualitative lessons, plus episode-local corrections.
 
-The start planner cannot elevate the identity gate. An unverified target queues `relook`; planning statements such as “blocked by neighbour” do not authorize closing or pushing. Mock clutter decisions require a true `neighbour_observed` field, rather than text matches against prior lessons.
+The start planner cannot elevate the identity gate. An unverified target queues `relook`; planning statements such as “blocked by neighbour” do not authorize closing or pushing.
 
 ## Diagnostics and asynchronous execution
 

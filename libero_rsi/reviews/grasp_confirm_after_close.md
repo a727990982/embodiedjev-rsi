@@ -12,8 +12,8 @@ After `close_gripper`: proprio (opening + pads) + short closed **lift probe** (+
 - **success=true** env_steps=496
 - First close t≈182: `grasp_confirm=true` → `grasp_confirm_skip` → **lift** (no push_aside / no deadend after close)
 - Video: `.../videos/ep.mp4`
+- Note: this run used the mock start-plan and slow-think backends, which have since been removed from this tree, so it cannot be reproduced as-is.
 
 ## Files
 - `libero_rsi/run_ep_fbpatch.py` — `_confirm_grasp_after_close`, gates
-- `libero_rsi/coding_agent_slow.py` — mock respects `grasp_secured`
 - `libero_rsi/smoke/test_grasp_confirm_logic.py`

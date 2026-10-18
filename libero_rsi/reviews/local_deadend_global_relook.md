@@ -22,7 +22,8 @@ When local/wrist near-grasp stall family thrash has no useful solution:
 - `EPISODE_START_PLAN=mock` `CODING_AGENT_SLOW=mock` `VIDEO=.../videos/ep.mp4`
 - **success=true** env_steps=423; deadend fired **2×** (approach_cap then episode_cap); both sync_cas_mock intervened with raise_redescend (not another push)
 - Video: `.../videos/ep.mp4` (~1.1MB)
+- Note: this run used the mock start-plan and slow-think backends, which have since been removed from this tree, so it cannot be reproduced as-is.
 
 ## Files
 - `libero_rsi/run_ep_fbpatch.py` — detection, retreat, global relook, sync slow hook, push caps
-- `libero_rsi/coding_agent_slow.py` — mock avoids push_aside on local_deadend / push cap
+- `libero_rsi/coding_agent_slow.py` — slow-think context and plan validation (the backend decides the replan; `local_deadend_global_relook` is passed in `slow_ctx`)

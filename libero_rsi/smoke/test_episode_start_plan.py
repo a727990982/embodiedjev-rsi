@@ -1,10 +1,8 @@
-"""Logic smoke: episode-start Great Wall plan (mock) → push_aside on observed neighbour with confirmed identity; harness hooks."""
+"""Logic smoke: episode-start Great Wall plan modes, Codex-shaped plan validation, identity gate, brief injection, harness hooks."""
 import json
 import os
 import sys
-import ast
 from pathlib import Path
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -13,104 +11,55 @@ import jev_experience as JX
 
 
 def main():
-    # Production defaults stay Codex even if an old role-switch env is present.
-    with patch.dict(os.environ, {'CODING_AGENT_SLOW': 'mock', 'EPISODE_START_PLAN': 'astra'}, clear=True):
-        assert CAS.backend_mode() == 'codex'
-        assert CAS.start_plan_backend_mode() == 'codex'
-        with patch.object(CAS, 'call_codex', return_value=(
-            {'issue': 'ok', 'intervene': False, 'plan': []}, {'backend': 'codex'})) as call:
-            _, rec = CAS.call_start_plan({'language_goal': 'place object'})
-            call.assert_called_once()
-            assert rec['backend'] == 'codex_start'
-    assert CAS.start_plan_backend_mode('mock') == 'mock'
+    assert CAS.start_plan_backend_mode() == 'codex'
     assert CAS.start_plan_backend_mode('codex') == 'codex'
+    for bad in ('mock', 'dual', 'astra', '0', 'off', '1', 'on', 'auto'):
+        try:
+            CAS.start_plan_backend_mode(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f'unsupported backend {bad!r} was accepted')
 
-    # 1) Observed neighbour + confirmed identity → push_aside lead
-    brief = {
-        'lessons': [{
-            'when': 'at episode start a neighbouring object sits close to the language-goal grasp',
-            'instead': 'plan a push_aside or clear_reapproach before the first approach',
-        }],
-        'recoveries': [{'when': 'blocked_by_neighbour', 'prefer': 'push_aside'}],
+    # 1) Codex-shaped neighbour plan; place without retreat is normalized
+    lang = 'pick up the cream cheese and place it in the basket'
+    raw_plan = {
+        'matched_language_goal': True,
+        'issue': 'blocked_by_neighbour',
+        'intervene': True,
+        'predicted_risks': ['neighbour_block'],
+        'step1_must': 'push_aside',
+        'phase_order': ['clear_neighbour', 'approach', 'grasp', 'lift', 'place'],
+        'diagnosis': 'neighbour near target — clear before first approach',
+        'lesson': 'When a neighbour sits next to the target at start, push it aside before approaching.',
+        'plan': [{'step': 'push_aside', 'direction': 'away_from_target', 'distance_objw': 1.0}],
     }
-    ctx = CAS.pack_start_context(
-        lang='pick up the cream cheese and place it in the basket',
-        experience_brief=brief,
-        start_hints={
-            'goal_id_confirmed': True,
-            'neighbour_observed': True,
-            'neighbour_prior': 'If neighbour may collide, plan push_aside before approach.',
-        },
-        keyframe_paths=[],
-    )
-    parsed, rec = CAS.call_start_plan(ctx, mode='mock')
-    assert rec['backend'] == 'mock_start'
-    ok, errs, norm = CAS.validate_start_plan(parsed)
+    ok, errs, norm = CAS.validate_start_plan(raw_plan, lang=lang)
     assert ok, errs
+    assert 'place_retreat_normalized' in errs
     assert norm['intervene'] is True
     assert norm['issue'] == 'blocked_by_neighbour'
     assert norm['step1_must'] == 'push_aside'
     assert norm['plan'][0]['step'] == 'push_aside'
     assert 'neighbour_block' in norm['predicted_risks']
     assert norm['phase_order'][0] == 'clear_neighbour'
-    assert 'retreat' in norm['phase_order']
-    # every place followed by retreat
     for i, ph in enumerate(norm['phase_order']):
         if ph == 'place':
             assert i + 1 < len(norm['phase_order']) and norm['phase_order'][i + 1] == 'retreat'
     assert CAS.applicator_accepts(norm)
 
-    # 2) Clear path → approach / no intervene
-    ctx2 = CAS.pack_start_context(
-        lang='pick up the butter and place it in the basket',
-        experience_brief={'lessons': [], 'recoveries': []},
-        start_hints={'goal_id_confirmed': True},
-    )
-    p2, _ = CAS.call_start_plan(ctx2, mode='mock')
-    assert p2['intervene'] is False
-    assert p2['plan'] == []
-    assert p2['step1_must'] in ('approach', 'none')
-    assert p2['phase_order'][-1] == 'retreat'
-    assert p2['phase_order'].count('place') == 1
+    # 2) Reject unknown risk / step1 / phase
+    ok_bad, errs_bad, _ = CAS.validate_start_plan(
+        dict(raw_plan, predicted_risks=['meteor'], step1_must='teleport', phase_order=['fly']), lang=lang)
+    assert not ok_bad
+    assert {'bad_risk:meteor', 'bad_step1:teleport', 'bad_phase:fly'} <= set(errs_bad)
 
-    # 3) Identity soft-unsure, no neighbour → relook
-    ctx3 = CAS.pack_start_context(
-        lang='soup',
-        experience_brief={},
-        start_hints={'goal_id_confirmed': False},
-    )
-    p3, _ = CAS.call_start_plan(ctx3, mode='mock')
-    assert p3['plan'] and p3['plan'][0]['step'] == 'relook'
-    assert p3['step1_must'] == 'relook'
-
-    # 3b) Soft-unsure + neighbour prior → relook, without inventing identity
-    ctx3b = CAS.pack_start_context(
-        lang='pick up the cream cheese and place it in the basket',
-        experience_brief=brief,
-        start_hints={
-            'goal_id_confirmed': False,
-            'identity_matched': None,
-            'verify_confirmed': None,
-            'neighbour_prior': 'neighbour may collide — plan push_aside before approach',
-        },
-    )
-    p3b, _ = CAS.call_start_plan(ctx3b, mode='mock')
-    assert p3b['plan'][0]['step'] == 'relook', p3b
-    assert p3b['step1_must'] == 'relook'
-    assert p3b['matched_language_goal'] is None
-
-    # 3c) Multi-object language → two place cycles ending in retreat
-    ctx_multi = CAS.pack_start_context(
-        lang='put both the cream cheese and the butter in the basket',
-        experience_brief={'lessons': [], 'recoveries': []},
-        start_hints={'goal_id_confirmed': True},
-    )
-    pm, _ = CAS.call_start_plan(ctx_multi, mode='mock')
-    assert pm['phase_order'].count('place') == 2, pm['phase_order']
-    assert pm['phase_order'].count('retreat') >= 2
-    for i, ph in enumerate(pm['phase_order']):
-        if ph == 'place':
-            assert pm['phase_order'][i + 1] == 'retreat'
+    # 3) step1 push_aside without a leading plan step gets one injected
+    ok_inj, errs_inj, norm_inj = CAS.validate_start_plan(
+        dict(raw_plan, plan=[{'step': 'relook'}]), lang=lang)
+    assert ok_inj, errs_inj
+    assert 'step1_plan_injected' in errs_inj
+    assert norm_inj['plan'][0]['step'] == 'push_aside'
 
     # 3d) validate_start_plan inserts retreat after place; soft-warns multi incomplete
     raw_sparse = {
@@ -141,7 +90,35 @@ def main():
         for i, ph in enumerate(norm_m['phase_order']) if ph == 'place'
     )
 
+    # 3e) Identity gate: an unconfirmed target cannot be cleared or approached
+    gated = CAS.gate_start_plan(norm, confirmed=False)
+    assert gated['plan'] == [{'step': 'relook'}]
+    assert gated['step1_must'] == 'relook'
+    assert gated['phase_order'][0] == 'relook' and 'clear_neighbour' not in gated['phase_order']
+    assert 'identity_ambiguous' in gated['predicted_risks']
+    assert gated['matched_language_goal'] is None
+    refused = CAS.gate_start_plan(dict(norm, matched_language_goal=False), confirmed=True)
+    assert refused['plan'] == [{'step': 'relook'}] and refused['issue'] == 'wrong_object'
+    assert CAS.gate_start_plan(norm, confirmed=True) == norm
+
     # 4) Prompt mentions Great Wall + experience_brief + retreat + multi-object
+    brief = {
+        'lessons': [{
+            'when': 'at episode start a neighbouring object sits close to the language-goal grasp',
+            'instead': 'plan a push_aside or clear_reapproach before the first approach',
+        }],
+        'recoveries': [{'when': 'blocked_by_neighbour', 'prefer': 'push_aside'}],
+    }
+    ctx = CAS.pack_start_context(
+        lang=lang,
+        experience_brief=brief,
+        start_hints={
+            'goal_id_confirmed': True,
+            'neighbour_observed': True,
+            'neighbour_prior': 'If neighbour may collide, plan push_aside before approach.',
+        },
+        keyframe_paths=[],
+    )
     prompt = CAS.build_start_prompt(ctx)
     assert 'Great Wall' in prompt or 'episode-START' in prompt
     assert 'push_aside' in prompt
@@ -168,8 +145,8 @@ def main():
 
     print(json.dumps({
         'ok': True,
-        'cases': ['modes', 'neighbour_push', 'clear_approach', 'identity_relook',
-                  'multi_object', 'validate_retreat', 'prompt', 'brief_inject', 'harness_hook'],
+        'cases': ['modes', 'neighbour_push', 'reject_bad', 'step1_inject',
+                  'validate_retreat', 'identity_gate', 'prompt', 'brief_inject', 'harness_hook'],
         'sample_plan': norm['plan'],
         'step1_must': norm['step1_must'],
     }))

@@ -1,8 +1,7 @@
 """Codex episode-start planner and mid-episode monitor for the LIBERO harness.
 
 Production uses Codex CLI for both planning stages and Astra perception/identity,
-and Jev for intent selection. Explicit mode='mock' is available only to offline
-callers/tests; runtime role selection is not controlled by environment switches.
+and Jev for intent selection. Mock backends are removed; runtime role selection is not controlled by environment switches.
 Plans are episode-local structured data, not generated control code.
 """
 from __future__ import annotations
@@ -90,9 +89,9 @@ Context JSON:
 
 
 def backend_mode(raw: Optional[str] = None) -> str:
-    """Codex in production; an explicit mock is available to offline tests."""
+    """Accept only Codex; removed backend names fail explicitly."""
     mode = 'codex' if raw is None else raw.strip().lower()
-    if mode not in ('codex', 'mock'):
+    if mode != 'codex':
         raise ValueError(f'unsupported_planning_backend:{mode}')
     return mode
 
@@ -224,117 +223,6 @@ def validate_intervention(parsed: Dict[str, Any]) -> Tuple[bool, List[str], Dict
     return (len(hard) == 0), errs, out
 
 
-def mock_intervene(ctx: Dict[str, Any]) -> Dict[str, Any]:
-    """Deterministic mock: neighbour → push_aside; empty/stall → raise; else ok."""
-    trigger = str(ctx.get('trigger') or '')
-    slow = ctx.get('slow_ctx') or {}
-    preds = (slow.get('predicates') or {}) if isinstance(slow, dict) else {}
-    last = str(slow.get('intent_result') or '')
-    # Never treat a field name, a false predicate, or an instruction as evidence.
-    blob = (trigger + ' ' + last + ' ' + ' '.join(k for k, v in preds.items() if v is True)).lower()
-    goal_id = (ctx.get('patch_goal') or {}).get('goal_id')
-    confirmed = goal_id.get('confirmed') if isinstance(goal_id, dict) else goal_id
-    if confirmed is not True:
-        return {
-            'matched_language_goal': None, 'is_goal_object': None,
-            'issue': 'wrong_object', 'intervene': True,
-            'diagnosis': 'mock: identity unverified — relook before contact',
-            'lesson': 'Verify target identity before contact.', 'plan': [{'step': 'relook'}],
-        }
-
-    # Confirmed grasp (harness proprio+lift): do not undo with push_aside / retreat
-    if isinstance(slow, dict) and (slow.get('grasp_secured') or slow.get('grasp_confirm')):
-        return {
-            'goal_object_where': 'language goal held between fingers',
-            'held_or_between_fingers': 'language-goal object',
-            'is_goal_object': True,
-            'matched_language_goal': True,
-            'issue': 'ok',
-            'intervene': False,
-            'diagnosis': 'mock: grasp confirmed — lift/carry, do not push_aside',
-            'lesson': 'After a confirmed close, lift; do not retreat or push neighbours while holding.',
-            'plan': [],
-        }
-
-    # After local-deadend global relook: do NOT keep proposing push_aside
-    if slow.get('local_deadend_global_relook') is True or 'local_deadend' in trigger:
-        return {
-            'goal_object_where': 'language goal after global front relook',
-            'held_or_between_fingers': 'nothing',
-            'is_goal_object': None,
-            'matched_language_goal': True,
-            'issue': 'other',
-            'intervene': True,
-            'diagnosis': 'mock: local dead-end cleared — replan from global view without another push_aside',
-            'lesson': 'When local near/wrist views have no solution, retreat, look at the global front view, then replan; do not loop push_aside.',
-            'plan': [{'step': 'raise_redescend'}],
-        }
-    # Push already exhausted in context → raise rather than another shove
-    try:
-        n_push = int(slow.get('push_aside_n') or 0) if isinstance(slow, dict) else 0
-        max_push = int(slow.get('max_push_aside') or 2) if isinstance(slow, dict) else 2
-    except Exception:
-        n_push, max_push = 0, 2
-    if n_push >= max_push:
-        return {
-            'goal_object_where': 'language goal; neighbour push budget exhausted',
-            'held_or_between_fingers': 'nothing',
-            'is_goal_object': None,
-            'matched_language_goal': True,
-            'issue': 'other',
-            'intervene': True,
-            'diagnosis': 'mock: push_aside cap reached — raise and re-approach from global view',
-            'lesson': 'Do not burn the horizon repeating push_aside; raise clear and replan.',
-            'plan': [{'step': 'raise_redescend'}],
-        }
-
-    if slow.get('neighbour_observed') is True:
-        return {
-            'goal_object_where': 'language goal near neighbourhood clutter',
-            'held_or_between_fingers': 'nothing',
-            'is_goal_object': None,
-            'matched_language_goal': True,
-            'issue': 'blocked_by_neighbour',
-            'intervene': True,
-            'diagnosis': 'mock: neighbour blocking grasp angle',
-            'lesson': 'When a neighbour blocks the grasp, clear or push aside then re-approach before closing.',
-            'plan': [{'step': 'push_aside', 'direction': 'away_from_target', 'distance_objw': 1.0}],
-        }
-    if any(k in blob for k in ('empty', 'empty_grasp', 'stalled', 'timeout', 'descent_servo_stalled', 'hard_stall')):
-        return {
-            'goal_object_where': 'language goal under approach',
-            'held_or_between_fingers': 'nothing',
-            'is_goal_object': None,
-            'matched_language_goal': True,
-            'issue': 'empty_grasp' if 'empty' in blob else 'other',
-            'intervene': True,
-            'diagnosis': 'mock: stalled / empty close — raise and redescend',
-            'lesson': 'After an empty close or stalled descent, raise clear then re-approach shallower.',
-            'plan': [{'step': 'raise_redescend'}],
-        }
-    if any(k in blob for k in ('identity', 'wrong_object', 'unmatched', 'hard_identity')):
-        return {
-            'goal_object_where': 'uncertain',
-            'held_or_between_fingers': 'nothing',
-            'is_goal_object': False,
-            'matched_language_goal': False,
-            'issue': 'wrong_object',
-            'intervene': True,
-            'diagnosis': 'mock: identity unstable — relook language goal',
-            'lesson': 'When target identity is unsure, relook before closing.',
-            'plan': [{'step': 'relook'}],
-        }
-    return {
-        'goal_object_where': 'ok',
-        'held_or_between_fingers': 'nothing',
-        'is_goal_object': None,
-        'matched_language_goal': True,
-        'issue': 'ok',
-        'intervene': False,
-        'diagnosis': 'mock: no intervention',
-        'lesson': '',
-        'plan': [],
-    }
 
 
 def _proxy_env() -> Dict[str, str]:
@@ -439,19 +327,6 @@ def call_monitor(
     mode = backend_mode(mode)
     prompt = build_prompt(ctx)
     images = list(ctx.get('keyframe_paths') or [])
-    if mode == 'mock':
-        raw = mock_intervene(ctx)
-        ok, errs, norm = validate_intervention(raw)
-        rec = {
-            'backend': 'mock',
-            'wall_s': 0.0,
-            'cost_usd': 0.0,
-            'validate_ok': ok,
-            'validate_errs': errs,
-        }
-        if not ok:
-            raise ValueError(f'mock_invalid:{errs}')
-        return norm, rec
     if mode == 'codex':
         raw, rec = call_codex(prompt, images)
         ok, errs, norm = validate_intervention(raw)
@@ -554,7 +429,7 @@ def harness_call_from_slow(*, mode: Optional[str] = None, **kwargs):
     return call_monitor(prepare_slow_context(**kwargs), mode=mode)
 
 
-# Astra visual perception through Codex CLI; mock fixtures are offline only.
+# Astra visual perception through Codex CLI.
 PERCEIVE_PROMPT = """You are the perception module of a single Franka arm with a parallel gripper (top-down grasps).
 Task instruction (language goal): "{lang}"
 Image size: {img_size}x{img_size} px from a fixed front (agentview) camera; robot base at the TOP of the image. Pixel v grows downward.
@@ -654,41 +529,6 @@ def validate_keypoints(parsed: Dict[str, Any], *, img_size: int = 512) -> Tuple[
     return ok, errs, out
 
 
-def mock_perceive(ctx: Dict[str, Any]) -> Dict[str, Any]:
-    """Deterministic keypoints for smoke (cream-ish layout from prior LIBERO agentview)."""
-    lang = str(ctx.get('language_goal') or '').lower()
-    phase = str(ctx.get('phase') or 'perceive_start')
-    # Default cream cheese → basket layout (approx. from prior Astra perceive_start)
-    grasp = [196.0, 310.0]
-    place = [416.0, 243.0]
-    named = 'cream cheese'
-    place_named = 'basket'
-    if 'ketchup' in lang:
-        grasp, named = [280.0, 300.0], 'ketchup'
-    elif 'butter' in lang:
-        grasp, named = [340.0, 280.0], 'butter'
-    elif 'soup' in lang or 'alphabet' in lang:
-        grasp, named = [150.0, 340.0], 'alphabet soup'
-    matched = True
-    if 'unmatched' in phase or 'force_null' in str(ctx.get('extra_context') or ''):
-        matched = None
-    return {
-        'goal_object_named': named,
-        'goal_object_where': f'{named} on the table near image centre',
-        'place_region_named': place_named,
-        'place_region_where': f'{place_named} toward image right',
-        'matched_language_goal': matched,
-        'grasp_px': grasp,
-        'grasp_yaw_deg': 5.0,
-        'grasp_depth_m': 0.015,
-        'object_center_px': list(grasp),
-        'object_height_m': 0.025,
-        'object_width_m': 0.06,
-        'place_px': place,
-        'place_clearance_m': 0.04,
-        'object_held_by_gripper': False,
-        'confidence': 0.85,
-    }
 
 
 def build_perceive_prompt(ctx: Dict[str, Any]) -> str:
@@ -715,20 +555,6 @@ def call_perceive(
     mode = backend_mode(mode)
     img_size = int(ctx.get('img_size') or 512)
     images = list(image_paths or ctx.get('image_paths') or [])[:4]
-    if mode == 'mock':
-        raw = mock_perceive(ctx)
-        ok, errs, norm = validate_keypoints(raw, img_size=img_size)
-        rec = {
-            'backend': 'mock',
-            'wall_s': 0.0,
-            'cost_usd': 0.0,
-            'validate_ok': ok,
-            'validate_errs': errs,
-            'phase': ctx.get('phase'),
-        }
-        if not ok:
-            raise ValueError(f'mock_perceive_invalid:{errs}')
-        return norm, rec
     if mode == 'codex':
         prompt = build_perceive_prompt(ctx)
         raw, rec = call_codex(prompt, images, timeout_s=timeout_s, model=PERCEPTION_MODEL, effort=effort)
@@ -775,7 +601,7 @@ def call_identity_check(prompt: str, image_paths: Sequence[str], *, effort: Opti
 
 # ---------------------------------------------------------------------------
 # Episode-start "Great Wall" global plan (predictive; before first approach)
-# Production uses Codex. Explicit mock calls are for offline tests only.
+# Production uses Codex; tests inject fixed replies at the transport boundary.
 # Plan step vocabulary matches mid-episode slow-think → `_apply_episode_plan`.
 # ---------------------------------------------------------------------------
 
@@ -1019,82 +845,6 @@ def validate_start_plan(
     return (len(hard) == 0), errs, out
 
 
-def mock_start_plan(ctx: Dict[str, Any]) -> Dict[str, Any]:
-    """Deterministic start plan: observed blocker + confirmed identity → push_aside.
-
-    Always ends each place with retreat. Multi-object language ("both" / " and ")
-    gets a second approach→grasp→lift→place→retreat cycle so mock tests match Codex intent.
-    """
-    hints = ctx.get('start_hints') or {}
-    lang = str(ctx.get('language_goal') or '')
-    multi = _lang_multi_object_cues(lang)
-    cycle = _default_object_cycle()
-    second = list(cycle) if multi else []
-
-    def _phases(*prefix: str) -> List[str]:
-        return list(prefix) + list(cycle) + second
-
-    # Conditional lessons and instructional hints are priors, not scene observations.
-    neighbour = hints.get('neighbour_observed') is True
-    id_ok = hints.get('goal_id_confirmed')
-    matched = hints.get('identity_matched')
-    verify = hints.get('verify_confirmed')
-    clearly_bad = (
-        matched is False or str(matched).lower() == 'false'
-        or verify is False or str(verify).lower() == 'false'
-    )
-    if clearly_bad or id_ok is not True:
-        return {
-            'matched_language_goal': False if clearly_bad else None,
-            'issue': 'wrong_object' if clearly_bad else 'other',
-            'intervene': True,
-            'predicted_risks': ['identity_ambiguous'],
-            'step1_must': 'relook',
-            'phase_order': _phases('relook'),
-            'diagnosis': 'mock: start identity rejected — relook before approach',
-            'lesson': 'When start identity is rejected, relook before the first approach.',
-            'plan': [{'step': 'relook'}],
-        }
-    if neighbour:
-        blocker = None
-        # Optional seed px from hints (general; not task-name)
-        bp = hints.get('suggested_blocker_px')
-        if isinstance(bp, (list, tuple)) and len(bp) >= 2:
-            try:
-                blocker = [float(bp[0]), float(bp[1])]
-            except (TypeError, ValueError):
-                blocker = None
-        step = {'step': 'push_aside', 'direction': 'away_from_target', 'distance_objw': 1.0}
-        if blocker:
-            step['blocker_px'] = blocker
-        return {
-            'matched_language_goal': True,
-            'issue': 'blocked_by_neighbour',
-            'intervene': True,
-            'predicted_risks': ['neighbour_block'],
-            'step1_must': 'push_aside',
-            'phase_order': _phases('clear_neighbour'),
-            'diagnosis': (
-                'mock: neighbour near target — clear before first approach'
-                + ('; then full cycles for each language object' if multi else '')
-            ),
-            'lesson': 'When a neighbour may block the grasp path, push aside or clear before approaching.',
-            'plan': [step],
-        }
-    return {
-        'matched_language_goal': True if id_ok is not False else None,
-        'issue': 'ok',
-        'intervene': False,
-        'predicted_risks': [],
-        'step1_must': 'approach',
-        'phase_order': _phases(),
-        'diagnosis': (
-            'mock: clear path — full place cycles'
-            + (' for each language object' if multi else ' then retreat')
-        ),
-        'lesson': '',
-        'plan': [],
-    }
 
 
 def gate_start_plan(plan: Dict[str, Any], confirmed: bool) -> Dict[str, Any]:
@@ -1119,19 +869,6 @@ def call_start_plan(
     """Run start-plan backend; return (normalized_plan, rec)."""
     mode = start_plan_backend_mode(mode)
     images = list(ctx.get('keyframe_paths') or [])[:4]
-    if mode == 'mock':
-        raw = mock_start_plan(ctx)
-        ok, errs, norm = validate_start_plan(raw, lang=str(ctx.get('language_goal') or ''))
-        rec = {
-            'backend': 'mock_start',
-            'wall_s': 0.0,
-            'cost_usd': 0.0,
-            'validate_ok': ok,
-            'validate_errs': errs,
-        }
-        if not ok:
-            raise ValueError(f'mock_start_plan_invalid:{errs}')
-        return norm, rec
     if mode == 'codex':
         prompt = build_start_prompt(ctx)
         raw, rec = call_codex(prompt, images, timeout_s=timeout_s)

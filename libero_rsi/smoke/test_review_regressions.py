@@ -69,45 +69,15 @@ class RegressionTests(unittest.TestCase):
         scope['set_goal_id'](True, 'relook')
         self.assertEqual(scope['GOAL_ID']['events'][0]['t'], 29)
 
-    def test_library_lessons_are_not_scene_evidence(self):
-        for name in ('ee_pg_easy_v2_lib.json', 'ee_pg_lib.json'):
-            lib = json.loads((ROOT / 'libs' / name).read_text())
-            brief = JX.build_jev_experience_brief(lib)
-            for confirmed in (True, False, None):
-                with self.subTest(library=name, confirmed=confirmed):
-                    ctx = CAS.pack_start_context(lang='put object in basket', experience_brief=brief,
-                        start_hints={'goal_id_confirmed': confirmed,
-                                     'neighbour_prior': 'If a neighbour blocks the target, push_aside.'})
-                    result, _ = CAS.call_start_plan(ctx, mode='mock')
-                    self.assertEqual(result['step1_must'], 'approach' if confirmed is True else 'relook')
-                    self.assertIs(result['matched_language_goal'], True if confirmed is True else None)
-        ctx['start_hints'].update(goal_id_confirmed=True, identity_matched=False, neighbour_observed=True)
-        result, _ = CAS.call_start_plan(ctx, mode='mock')
-        self.assertEqual(result['step1_must'], 'relook')
-        self.assertIs(result['matched_language_goal'], False)
-
-    def test_monitor_ignores_instructions_and_false_flags(self):
-        ctx = CAS.pack_context(lang='put object in basket', trigger='async_watch', recent_diag=[],
-            experience_brief={'lessons': ['blocked_by_neighbour -> push_aside']}, patch={},
-            goal_id={'confirmed': True}, slow_ctx={
-                'intent_result': 'approached', 'predicates': {'descent_servo_stalled': False},
-                'local_deadend_global_relook': False, 'grasp_confirm': False,
-                'hint': 'if local_deadend_global_relook then do not push_aside; if neighbour then push_aside'})
-        result, _ = CAS.call_monitor(ctx, mode='mock')
-        self.assertFalse(result['intervene'])
-        ctx['patch_goal']['goal_id']['confirmed'] = False
-        ctx['slow_ctx']['neighbour_observed'] = True
-        result, _ = CAS.call_monitor(ctx, mode='mock')
-        self.assertEqual(result['plan'], [{'step': 'relook'}])
-        self.assertIsNone(result['matched_language_goal'])
-
     def test_removed_backends_are_rejected_without_calls(self):
-        for mode in ('dual', 'astra', 'off', '0', 'auto'):
+        for mode in ('mock', 'dual', 'astra', 'off', '0', 'auto', '1', 'on'):
             with self.subTest(mode=mode), patch.object(CAS, 'call_codex') as codex:
                 with self.assertRaisesRegex(ValueError, 'unsupported_planning_backend'):
                     CAS.call_monitor({}, mode=mode)
                 with self.assertRaisesRegex(ValueError, 'unsupported_planning_backend'):
                     CAS.call_start_plan({}, mode=mode)
+                with self.assertRaisesRegex(ValueError, 'unsupported_planning_backend'):
+                    CAS.call_perceive({}, mode=mode)
                 codex.assert_not_called()
 
     def test_async_uses_snapshot_and_main_thread_logging(self):

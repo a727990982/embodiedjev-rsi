@@ -17,7 +17,8 @@ class CodexVisionTests(unittest.TestCase):
     def test_harness_perception_and_identity_use_astra_via_codex(self):
         for phase in ('perceive_start', 'relook', 'escape_look'):
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temp:
-                raw = CAS.mock_perceive({'language_goal': 'put butter in basket'})
+                raw = {'grasp_px': [200, 300], 'object_center_px': [200, 300],
+                       'place_px': [400, 240], 'matched_language_goal': True}
                 replies = [raw, {'is_language_goal_object': True, 'reason': 'marked goal'}]
                 calls, logs = [], []
                 def run(cmd, **kwargs):
@@ -56,7 +57,8 @@ class CodexVisionTests(unittest.TestCase):
                 self.assertIn('RED circle+cross', calls[1][1]['input'])
 
     def test_keypoints_validated_and_uncertain_identity_preserved(self):
-        raw = CAS.mock_perceive({'phase': 'unmatched'})
+        raw = {'grasp_px': [200, 300], 'object_center_px': [200, 300],
+               'place_px': [400, 240], 'matched_language_goal': None}
         with patch.object(CAS, 'call_codex', return_value=(raw, {})):
             parsed, rec = CAS.call_perceive({'img_size': 512}, mode='codex')
         self.assertIsNone(parsed['matched_language_goal'])

@@ -1,4 +1,4 @@
-"""Smoke: coding-agent slow monitor mock → valid plan JSON → applicator accepts.
+"""Smoke: coding-agent slow monitor modes, Codex-shaped plan JSON → validator → applicator accepts.
 
 No MuJoCo / Astra / Codex network.
 """
@@ -12,10 +12,68 @@ import coding_agent_slow as CAS
 
 
 def main():
-    assert CAS.backend_mode('mock') == 'mock'
+    assert CAS.backend_mode() == 'codex'
     assert CAS.backend_mode('codex') == 'codex'
+    for bad in ('mock', 'dual', 'astra', '0', 'off', '1', 'on', 'auto'):
+        try:
+            CAS.backend_mode(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f'unsupported backend {bad!r} was accepted')
 
-    # 1) Neighbour stall → push_aside
+    # 1) Codex-shaped neighbour push_aside plan
+    neighbour = {
+        'goal_object_where': 'language goal near neighbourhood clutter',
+        'held_or_between_fingers': 'nothing',
+        'is_goal_object': None,
+        'matched_language_goal': True,
+        'issue': 'blocked_by_neighbour',
+        'intervene': True,
+        'diagnosis': 'neighbour blocking grasp angle',
+        'lesson': 'When a neighbour blocks the grasp, push aside then re-approach before closing.',
+        'plan': [{'step': 'push_aside', 'direction': 'away_from_target', 'distance_objw': '1.0',
+                  'blocker_px': [210, 300]}],
+    }
+    ok, errs, norm = CAS.validate_intervention(neighbour)
+    assert ok, errs
+    assert norm['intervene'] is True
+    assert norm['issue'] == 'blocked_by_neighbour'
+    assert norm['plan'] == [{'step': 'push_aside', 'blocker_px': [210.0, 300.0],
+                             'direction': 'away_from_target', 'distance_objw': 1.0}]
+    assert CAS.applicator_accepts(neighbour), norm
+
+    # 2) Codex-shaped ok / no-op reply; issue ok forces intervene False
+    noop = {
+        'goal_object_where': 'ok',
+        'held_or_between_fingers': 'nothing',
+        'is_goal_object': None,
+        'matched_language_goal': True,
+        'issue': 'ok',
+        'intervene': True,
+        'diagnosis': 'no intervention',
+        'lesson': '',
+        'plan': [],
+    }
+    ok_n, errs_n, norm_n = CAS.validate_intervention(noop)
+    assert ok_n, errs_n
+    assert norm_n['intervene'] is False
+    assert norm_n['plan'] == []
+    assert CAS.applicator_accepts(noop)
+
+    # 3) Intervene without a usable plan is rejected
+    ok_e, errs_e, _ = CAS.validate_intervention({'issue': 'empty_grasp', 'intervene': True, 'plan': []})
+    assert not ok_e
+    assert 'intervene_without_plan' in errs_e
+
+    # 4) Reject bad step
+    bad = {'issue': 'other', 'intervene': True, 'plan': [{'step': 'teleport'}]}
+    ok_b, errs_b, _ = CAS.validate_intervention(bad)
+    assert not ok_b
+    assert any('bad_step' in e for e in errs_b)
+    assert not CAS.applicator_accepts(bad)
+
+    # 5) Prompt builds and mentions allowed steps
     ctx = CAS.pack_context(
         lang='put the cream cheese in the basket',
         trigger='hard_stall',
@@ -30,77 +88,17 @@ def main():
             'neighbour_observed': True,
         },
     )
-    parsed, rec = CAS.call_monitor(ctx, mode='mock')
-    assert rec['backend'] == 'mock'
-    ok, errs, norm = CAS.validate_intervention(parsed)
-    assert ok, errs
-    assert norm['intervene'] is True
-    assert norm['issue'] == 'blocked_by_neighbour'
-    assert norm['plan'][0]['step'] == 'push_aside'
-    assert CAS.applicator_accepts(norm), norm
-
-    # 2) Empty grasp → raise_redescend
-    ctx2 = CAS.pack_context(
-        lang='put the ketchup in the basket',
-        trigger='spectator_defer',
-        recent_diag=[],
-        experience_brief={},
-        patch={},
-        goal_id=True,
-        slow_ctx={'intent_result': 'empty_close', 'predicates': {'empty_close': True}},
-    )
-    p2, _ = CAS.call_monitor(ctx2, mode='mock')
-    assert p2['plan'][0]['step'] == 'raise_redescend'
-    assert CAS.applicator_accepts(p2)
-
-    # 3) Identity → relook
-    ctx3 = CAS.pack_context(
-        lang='butter',
-        trigger='hard_identity_unstable',
-        recent_diag=[],
-        experience_brief={},
-        patch={},
-        goal_id=False,
-        slow_ctx={'intent_result': 'close_refused_identity'},
-    )
-    p3, _ = CAS.call_monitor(ctx3, mode='mock')
-    assert p3['plan'][0]['step'] == 'relook'
-    assert CAS.applicator_accepts(p3)
-
-    # 4) Progressing → ok / empty plan
-    ctx4 = CAS.pack_context(
-        lang='cream',
-        trigger='async_watch',
-        recent_diag=[],
-        experience_brief={},
-        patch={},
-        goal_id=True,
-        slow_ctx={'intent_result': 'approached', 'predicates': {}},
-    )
-    p4, _ = CAS.call_monitor(ctx4, mode='mock')
-    assert p4['intervene'] is False
-    assert p4['plan'] == []
-    assert CAS.applicator_accepts(p4)
-
-    # 5) Reject bad step
-    bad = {'issue': 'other', 'intervene': True, 'plan': [{'step': 'teleport'}]}
-    ok_b, errs_b, _ = CAS.validate_intervention(bad)
-    assert not ok_b
-    assert any('bad_step' in e for e in errs_b)
-
-    # 6) Prompt builds and mentions allowed steps
     prompt = CAS.build_prompt(ctx)
     assert 'push_aside' in prompt and 'raise_redescend' in prompt
     assert 'Reply ONLY one JSON object' in prompt
 
-    # 7) Harness retains the Codex monitor hook
+    # 6) Harness still documents CODING_AGENT_SLOW hook
     harness = (Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py').read_text()
-    assert "CAS.call_monitor(snapshot['coding_context'], mode='codex')" in harness
     assert 'coding_agent_slow' in harness
 
     print(json.dumps({
         'ok': True,
-        'cases': ['neighbour_push', 'empty_raise', 'identity_relook', 'ok_noop', 'reject_bad', 'prompt', 'harness_hook'],
+        'cases': ['modes', 'neighbour_push', 'ok_noop', 'reject_no_plan', 'reject_bad', 'prompt', 'harness_hook'],
         'sample_plan': norm['plan'],
     }))
 
