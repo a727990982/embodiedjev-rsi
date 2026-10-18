@@ -23,7 +23,7 @@ The following private bench adapters are not included. Supply their directory vi
 
 Async Astra calls can overlap synchronous calls. External clients must support concurrent requests and protect their own shared budgets/ledgers. This repository cannot verify their implementation.
 
-`CODING_AGENT_SLOW=codex` and `dual` additionally require the Codex CLI and its configured authentication. `dual` records a Codex proposal while applying Astra's answer; a Codex failure is recorded, without substituting a mock result. `mock` is a deterministic test backend and does not provide visual evidence of identity or clutter.
+`CODING_AGENT_SLOW=codex` and `dual` additionally require the Codex CLI and its configured authentication. `dual` records a Codex proposal while applying Astra's answer; a Codex failure is recorded and Astra continues. Unsupported backend values, including the removed `mock`, raise an error at startup.
 
 ## Policy-visible inputs
 
@@ -33,7 +33,7 @@ Async Astra calls can overlap synchronous calls. External clients must support c
 - Official binary success, which terminates the episode.
 - Library predicates, recoveries and qualitative lessons, plus episode-local corrections.
 
-The start planner cannot elevate the identity gate. An unverified target queues `relook`; planning statements such as “blocked by neighbour” do not authorize closing or pushing. Mock clutter decisions require a true `neighbour_observed` field, rather than text matches against prior lessons.
+The start planner cannot elevate the identity gate. An unverified target queues `relook`; planning statements such as “blocked by neighbour” do not authorize closing or pushing.
 
 ## Diagnostics and asynchronous execution
 

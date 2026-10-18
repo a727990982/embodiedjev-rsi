@@ -4,22 +4,22 @@ Public snapshot of the LIBERO RSI / EmbodiedJev harness. This repo had no prior 
 
 | Path | Role |
 |---|---|
-| `libero_rsi/coding_agent_slow.py` | Episode-start plan, mid-episode slow-think, and perceive. Backends: `mock` (local, no network) and `codex` (`codex exec`). |
+| `libero_rsi/coding_agent_slow.py` | Episode-start plan, mid-episode slow-think, and perceive. Backend: `codex` (`codex exec`); unsupported values such as `mock` raise an error at startup. |
 | `libero_rsi/run_ep_fbpatch.py` | Episode harness: Jev intents, stall feedback, grasp confirm, local-deadend relook, place force-release. Needs LIBERO, MuJoCo, and the Astra/Jev clients to actually roll out. |
 | `libero_rsi/jev_experience.py` | Builds `experience_brief` (recoveries, lessons, and the start-plan prior) for Jev. |
 | `libero_rsi/validate.py` | Library validator. Imports sibling `dsl_libero.py`. |
 | `libero_rsi/dsl_libero.py` | Expression DSL and dimensional checks used by the validator and logic smokes. |
 | `libero_rsi/libs/*.json` | Experience libraries, including `ee_pg_easy_v2_lib.json`. |
-| `libero_rsi/smoke/test_*.py` | Logic tests. No simulator and no network on the mock path. |
+| `libero_rsi/smoke/test_*.py` | Logic tests of validators, gating, prompts, and harness hooks. No simulator and no network. |
 | `libero_rsi/reviews/*.md` | Design notes for the behaviors below. |
 
 ## Episode-start global plan
 
-`EPISODE_START_PLAN` is `0` (off), `mock`, `codex`, `astra`, or `auto` (empty/`auto` inherits `CODING_AGENT_SLOW`, or `CODING_AGENT_PERCEIVE` when slow-think is off).
+`EPISODE_START_PLAN` is `0` (off), `codex`, `astra`, or `auto` (empty/`auto` uses `codex` when `CODING_AGENT_SLOW` is `codex`/`dual` or `CODING_AGENT_PERCEIVE` is `codex`, else off).
 
 Before the first approach the planner reads `experience_brief` and writes one ordered skeleton (`start_plan.json`). `phase_order` is a full cycle per language-goal object: approach → grasp → lift → place → **retreat**, then the next object, ending with a retreat. Retreat after every place is filled in if the model omits it. Mid-episode slow-think only fine-tunes that skeleton.
 
-`mock` uses explicit start observations: `neighbour_observed=true` plus confirmed identity permits `push_aside`; conditional lessons and neighbour priors alone do not. Unknown or rejected identity leads to `relook`. `codex` calls the Codex CLI. `astra` is applied by the harness client.
+`codex` calls the Codex CLI. `astra` is applied by the harness client.
 
 The start planner cannot confirm target identity. Its proposed plan and the gated executable plan are both saved in `start_plan.json`. When the identity gate is unconfirmed, the harness queues a real `relook` intent before contact, even if the planner claims a match.
 
@@ -39,13 +39,15 @@ After `close_gripper`, `_confirm_grasp_after_close` checks proprio (opening and 
 
 During place, consecutive `lower_to_place` stalls (`MAX_PLACE_LOWER_STALL`, default 3) or lift↔lower cycles (`MAX_PLACE_LIFT_LOWER_CYCLES`, default 2), while the held object is near the place XY, set `place_force_release` and force `open_gripper`.
 
-## Mock vs Codex
+## Backends
 
-| Env | `0` / unset | `mock` | `codex` | other |
-|---|---|---|---|---|
-| `CODING_AGENT_SLOW` | Astra slow-think | local monitor | Codex monitor | `dual` calls Codex for logging and still applies Astra; Codex errors are logged and Astra continues |
-| `CODING_AGENT_PERCEIVE` | Astra keypoints | local keypoints | Codex keypoints | off |
-| `EPISODE_START_PLAN` | inherit, else off | local start plan | Codex start plan | `astra` uses the harness client |
+| Env | `0` / unset | `codex` | other |
+|---|---|---|---|
+| `CODING_AGENT_SLOW` | Astra slow-think | Codex monitor | `dual` calls Codex for logging and still applies Astra; Codex errors are logged and Astra continues |
+| `CODING_AGENT_PERCEIVE` | Astra keypoints | Codex keypoints | `astra` is the same as off |
+| `EPISODE_START_PLAN` | inherit, else off | Codex start plan | `astra` uses the harness client |
+
+Unsupported values, including the removed `mock` backend and bare `1`/`on`, raise an error at startup before the simulator is created.
 
 Codex looks up `codex` on `PATH`, or `CODING_AGENT_CODEX_BIN`. A proxy is used only when `CODING_AGENT_HTTP_PROXY` or `CODING_AGENT_SOCKS` is set. Do not commit proxy URLs, keys, or host details.
 
@@ -53,7 +55,7 @@ Async slow-think captures a detached copy of policy state and a unique image bef
 
 ## Running an episode
 
-This snapshot does **not** include `astra_client` or `jev_choice`. Actual rollouts require those external clients, LIBERO with its assets, MuJoCo/robosuite, and rendering dependencies. The client interfaces and policy/diagnostic boundary are documented in [libero_rsi/ADAPTER.md](libero_rsi/ADAPTER.md). Setting the coding backends to `mock` does not make the full harness offline: identity verification and Jev execution still need the clients.
+This snapshot does **not** include `astra_client` or `jev_choice`. Actual rollouts require those external clients, LIBERO with its assets, MuJoCo/robosuite, and rendering dependencies. The client interfaces and policy/diagnostic boundary are documented in [libero_rsi/ADAPTER.md](libero_rsi/ADAPTER.md). Identity verification and Jev execution always need the clients.
 
 Once the external dependencies are installed:
 
@@ -77,6 +79,6 @@ test "$failed" -eq 0
 
 Each test adds `libero_rsi/` to `sys.path`, so `validate` and `dsl_libero` resolve as siblings. `numpy` is required for the tests that import it. No simulator and no network.
 
-The regression suite executes selected production functions with environment/model doubles, covering identity authorization, observed versus prior clutter, dual routing, event timestamps, async snapshots, diagnostic isolation, recovery failures, and validation of every shipped library. These tests do not establish simulation success.
+The regression suite executes selected production functions with environment/model doubles, covering identity authorization, dual routing, rejection of unsupported backend values, event timestamps, async snapshots, diagnostic isolation, recovery failures, and validation of every shipped library. These tests do not establish simulation success.
 
 `libs/smoke_copies/` contains duplicate library fixtures retained from the original snapshot; these are not independent policy variants or experimental results.

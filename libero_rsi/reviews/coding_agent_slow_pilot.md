@@ -1,6 +1,6 @@
 # Coding-agent slow-think pilot (EmbodiedEvo-inspired)
 
-Date: 2026-10-18 (America/New_York). Status: **scaffolded** — mock smoke green; real 1-ep A/B not started (wait for `ee_pg_retest_push`).
+Date: 2026-10-18 (America/New_York). Status: **scaffolded** — offline validator smoke green; real 1-ep A/B not started (wait for `ee_pg_retest_push`).
 
 ## EmbodiedEvo here (what exists)
 
@@ -26,16 +26,16 @@ There is **no separate failure summarizer** — the same coding agent reads raw 
 
 | Path | Role |
 |---|---|
-| `libero_rsi/coding_agent_slow.py` | Context pack, prompt, mock + Codex backends, validate, applicator gate |
-| `libero_rsi/run_ep_fbpatch.py` | Env `CODING_AGENT_SLOW` (default off). `mock`/`codex` replace Astra on sync/async slow; `dual` runs mock/codex then still applies Astra (log both) |
-| `libero_rsi/smoke/test_coding_agent_slow_pilot.py` | Mock stall → valid plan → accepts (no sim) |
+| `libero_rsi/coding_agent_slow.py` | Context pack, prompt, Codex backend, validate, applicator gate |
+| `libero_rsi/run_ep_fbpatch.py` | Env `CODING_AGENT_SLOW` (default off). `codex` replaces Astra on sync/async slow; `dual` runs Codex then still applies Astra (log both) |
+| `libero_rsi/smoke/test_coding_agent_slow_pilot.py` | Mode resolver + Codex-shaped plan validation → applicator accepts (no sim) |
 
 ## A/B protocol (ONE hard ep)
 
 Prefer **libero_object cream `t1_i0`** (or ketchup `t5_i0` if cream already saturated). Same lib snapshot as push retest (`ee_pg_easy_v2` / `lib_used.json`), `ASTRA_EFFORT=xhigh`, `GATE_JEV=1`, `HORIZON=600`.
 
 1. **Baseline A:** `CODING_AGENT_SLOW=0` (current Astra slow-think). Reuse a finished push-retest ep if seed/lib match; else re-run once.
-2. **Pilot B:** `CODING_AGENT_SLOW=codex` (or `mock` for dry wiring). Same suite/tid/init/lib/out root under `runs/coding_agent_slow_ab/`.
+2. **Pilot B:** `CODING_AGENT_SLOW=codex`. Same suite/tid/init/lib/out root under `runs/coding_agent_slow_ab/`.
 3. Optional **dual:** `CODING_AGENT_SLOW=dual` — coding-agent proposal logged; Astra still applied (compare plans without changing control yet).
 
 Do **not** start B until `ee_pg_retest_push` finishes (GPU + Astra budget). Push retest remains the right baseline to wait for: it measures the new `push_aside` auto menu; coding-agent monitor is the next layer on top of that recovery vocabulary.
@@ -67,7 +67,7 @@ python libero_rsi/smoke/test_coding_agent_slow_pilot.py
 | Risk | Mitigation |
 |---|---|
 | Latency (Codex >> Astra JPEG call) | Sync-only on critical triggers first; keep async Astra or skip async for pilot |
-| Cost | Cap `MAX_SLOW`; one ep; prefer `mock` for wiring |
+| Cost | Cap `MAX_SLOW`; one ep; check wiring with the offline smokes first |
 | Overwrite races | Reuse existing `job_id` + private `result_box` (B01); coding worker writes only into that box |
 | Bad JSON / illegal steps | `validate_intervention` before `_finish_slow`; on failure fall back to Astra |
 | Proxy required for Codex | Set `CODING_AGENT_HTTP_PROXY` or `CODING_AGENT_SOCKS` in the environment. Nothing is baked in. |
@@ -75,8 +75,11 @@ python libero_rsi/smoke/test_coding_agent_slow_pilot.py
 
 ## Recommendation
 
+The mock backend referred to in earlier versions of this note has been removed; unsupported `CODING_AGENT_SLOW` / `CODING_AGENT_PERCEIVE` values now raise at startup.
+
+
 1. Let **`ee_pg_retest_push`** finish → score push_aside auto path.  
-2. Run mock smoke (already).  
+2. Run offline smokes (already).  
 3. One cream/ketchup ep with `CODING_AGENT_SLOW=dual` (log-only disagreement).  
 4. If dual plans look saner on neighbour blocks, cut over that ep to `codex` replace and compare success / steps-to-grasp.
 
@@ -84,13 +87,13 @@ python libero_rsi/smoke/test_coding_agent_slow_pilot.py
 
 ## Perceive via coding agent (2026-10-18)
 
-Env **`CODING_AGENT_PERCEIVE=0|mock|codex`** (default off). When `mock`/`codex`, harness `perceive()` (episode-start **and** mid-episode relook / escape_look) asks Codex (or mock) for the **same keypoint JSON** Astra returns (`grasp_px`, `place_px`, yaw/depth, `matched_language_goal`, …) so `_commit_keypoints` is unchanged. On failure → Astra fallback. **`verify_grasp_identity` stays on Astra.**
+Env **`CODING_AGENT_PERCEIVE=0|codex`** (default off). When `codex`, harness `perceive()` (episode-start **and** mid-episode relook / escape_look) asks Codex for the **same keypoint JSON** Astra returns (`grasp_px`, `place_px`, yaw/depth, `matched_language_goal`, …) so `_commit_keypoints` is unchanged. On failure → Astra fallback. **`verify_grasp_identity` stays on Astra.**
 
 | Path | Role |
 |---|---|
-| `coding_agent_slow.py` | `perceive_backend_mode`, `validate_keypoints`, `mock_perceive`, `call_perceive`, `harness_call_perceive` |
+| `coding_agent_slow.py` | `perceive_backend_mode`, `validate_keypoints`, `call_perceive`, `harness_call_perceive` |
 | `run_ep_fbpatch.py` | `CODING_AGENT_PERCEIVE` hook inside `perceive()`; saves front (+wrist) stills under `perc_<phase>_*.jpg` |
-| `smoke/test_coding_agent_perceive.py` | Mock keypoints validate (no sim) |
+| `smoke/test_coding_agent_perceive.py` | Codex-shaped keypoints validate (no sim) |
 
 ### Run both flags (cream t1_i0)
 

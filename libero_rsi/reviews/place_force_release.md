@@ -20,3 +20,4 @@ Cream graspconfirm ep: `carry_to_place` reached, then ~21× `lower_to_place` sta
 - **success=true** `finish_then_success` env_steps=**251** (prior graspconfirm thrash ep: 496)
 - Place: `carry` reached → `lower_to_place` **reached once** → `open_gripper` ~t=243 (0 lower stalls; force gate not needed this seed)
 - Video: `runs/ep_start_plan_cream/libero_object_t1_i0_mock_spmock_placeforce/videos/ep.mp4`
+- Note: this run used the mock start-plan and slow-think backends, which have since been removed from this tree, so it cannot be reproduced as-is.
