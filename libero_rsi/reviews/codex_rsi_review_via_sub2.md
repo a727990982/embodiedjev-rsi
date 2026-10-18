@@ -9,8 +9,8 @@ Short names:
 - **Runner**: `libero_rsi/run_ep_fbpatch.py`
 - **Playground**: `rsi_playground_ee.py` (private bench; not in this snapshot)
 - **Library**: `libero_rsi/libs/ee_pg_easy_v2_lib.json`
-- **Validator**: `validate.py` (private bench; not in this snapshot)
-- **DSL**: `dsl_libero.py` (private bench; not in this snapshot)
+- **Validator**: `libero_rsi/validate.py`
+- **DSL**: `libero_rsi/dsl_libero.py`
 - **Experience**: `libero_rsi/jev_experience.py`
 - **Orchestrator**: `rsi_libero_v2.py` (private bench; not in this snapshot)
 

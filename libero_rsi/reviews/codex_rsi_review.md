@@ -8,8 +8,8 @@
 - [`run_ep_fbpatch.py`](../run_ep_fbpatch.py)
 - `rsi_playground_ee.py` (private bench; not in this snapshot)
 - [`ee_pg_easy_v2_lib.json`](../libs/ee_pg_easy_v2_lib.json)
-- `validate.py` (private bench; not in this snapshot)
-- `dsl_libero.py` (private bench; not in this snapshot)
+- [`validate.py`](../validate.py)
+- [`dsl_libero.py`](../dsl_libero.py)
 
 ---
 

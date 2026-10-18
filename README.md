@@ -7,6 +7,8 @@ Public snapshot of the LIBERO RSI / EmbodiedJev harness. This repo had no prior 
 | `libero_rsi/coding_agent_slow.py` | Episode-start plan, mid-episode slow-think, and perceive. Backends: `mock` (local, no network) and `codex` (`codex exec`). |
 | `libero_rsi/run_ep_fbpatch.py` | Episode harness: Jev intents, stall feedback, grasp confirm, local-deadend relook, place force-release. Needs LIBERO, MuJoCo, and the Astra/Jev clients to actually roll out. |
 | `libero_rsi/jev_experience.py` | Builds `experience_brief` (recoveries, lessons, and the start-plan prior) for Jev. |
+| `libero_rsi/validate.py` | Library validator. Imports sibling `dsl_libero.py`. |
+| `libero_rsi/dsl_libero.py` | Expression DSL and dimensional checks used by the validator and logic smokes. |
 | `libero_rsi/libs/*.json` | Experience libraries, including `ee_pg_easy_v2_lib.json`. |
 | `libero_rsi/smoke/test_*.py` | Logic tests. No simulator and no network on the mock path. |
 | `libero_rsi/reviews/*.md` | Design notes for the behaviors below. |
@@ -55,25 +57,4 @@ for t in libero_rsi/smoke/test_*.py; do
 done
 ```
 
-These run with no extra modules:
-
-- `test_episode_start_plan.py`
-- `test_coding_agent_slow_pilot.py`
-- `test_coding_agent_perceive.py`
-- `test_grasp_confirm_logic.py`
-- `test_place_force_release_logic.py`
-- `test_goal_ownership_logic.py` (numpy)
-- `test_async_slow_ownership.py`
-- `test_clear_reapproach_yaw.py`
-- `test_post_recovery_ns_freshness.py` (numpy)
-- `test_reapproach_before_close.py` (numpy)
-- `test_slow_prompt_issue_enum.py`
-- `test_spectator_jev_gate.py`
-
-These five also import `validate` and/or `dsl_libero` from the private bench (not in this snapshot). Put those modules on `PYTHONPATH` before running them:
-
-- `test_ask_astra_help_logic.py`
-- `test_deadlock_escape_logic.py`
-- `test_jev_experience_brief.py`
-- `test_push_aside_neighbour.py`
-- `test_stall_feedback_logic.py`
+Each test adds `libero_rsi/` to `sys.path`, so `validate` and `dsl_libero` resolve as siblings. `numpy` is required for the tests that import it. No simulator and no network.

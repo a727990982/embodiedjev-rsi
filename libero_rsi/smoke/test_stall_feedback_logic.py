@@ -66,7 +66,7 @@ def base_ns(**kw):
     return ns
 
 def main():
-    assert LIB['version'] == 'ee_pg_v13'
+    assert LIB['version'] == 'ee_pg_v14+place_release'
     V.validate(LIB)
     assert any(r.get('stall_feedback') for r in LIB['recoveries'])
     assert any(r.get('id') == 'hp_neighbour_block_push_aside' for r in LIB['recoveries'])
