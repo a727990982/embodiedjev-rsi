@@ -1,0 +1,479 @@
+{
+ "version": "stagefail_soup_v0",
+ "note": "Generic cold-start pick-and-place menu over honest LIBERO signals (proprioception, finger contact flags, Astra keypoints). No task-specific constants; no grasp verification, placement correction or retry rules yet (left to RSI).",
+ "intent_instructions": "Select the next intent whose definition and preconditions match observed_facts and the predicates. Typical order: move_above_object, descend_to_grasp, close_gripper, lift, carry_to_place, lower_to_place, open_gripper, retreat, finish.",
+ "intents": [
+  {
+   "id": "move_above_object@v0",
+   "name": "move_above_object",
+   "action": "move",
+   "fingers": "open",
+   "definition": "Gripper open and not above_grasp: move above the estimated grasp point.",
+   "refpoint": "vec(grasp[0], grasp[1], grasp[2] + 2*obj_h)",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "descend_to_grasp@v0",
+   "name": "descend_to_grasp",
+   "action": "move",
+   "fingers": "open",
+   "definition": "above_grasp is true and at_grasp is false, gripper open: descend to the grasp point.",
+   "refpoint": "grasp",
+   "gain": "0.5",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "close_gripper@v0",
+   "name": "close_gripper",
+   "action": "move",
+   "fingers": "close",
+   "definition": "at_grasp is true and the gripper is open: close the fingers.",
+   "refpoint": "tcp",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "lift@v0",
+   "name": "lift",
+   "action": "move",
+   "fingers": "close",
+   "definition": "Gripper closed on the object and not lifted: raise vertically.",
+   "refpoint": "vec(tcp[0], tcp[1], max(grasp[2], place[2]) + 3*obj_h)",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "carry_to_place@v0",
+   "name": "carry_to_place",
+   "action": "move",
+   "fingers": "close",
+   "definition": "lifted is true and above_place is false: carry the held object above the place point.",
+   "refpoint": "vec(place[0] + grasp[0] - objc[0], place[1] + grasp[1] - objc[1], tcp[2])",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "lower_to_place@v0",
+   "name": "lower_to_place",
+   "action": "move",
+   "fingers": "close",
+   "definition": "above_place is true and the gripper is still closed: lower the object to the release height.",
+   "refpoint": "vec(tcp[0], tcp[1], place[2] + clear + tcp_at_close[2] - objc[2] + obj_h)",
+   "gain": "0.5",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "open_gripper@v0",
+   "name": "open_gripper",
+   "action": "move",
+   "fingers": "open",
+   "definition": "The object has been lowered over the place point: open the fingers to release.",
+   "refpoint": "tcp",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "retreat@v0",
+   "name": "retreat",
+   "action": "move",
+   "fingers": "open",
+   "definition": "released_since_close is true: raise the empty gripper.",
+   "refpoint": "vec(tcp[0], tcp[1], max(tcp[2], place[2] + 3*obj_h))",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "reopen_and_retry@v0",
+   "name": "reopen_and_retry",
+   "action": "move",
+   "fingers": "open",
+   "definition": "The grasp failed (gripper closed but the object is not held): open and go back above the grasp point.",
+   "refpoint": "vec(grasp[0], grasp[1], grasp[2] + 2*obj_h)",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "relook@v0",
+   "name": "relook",
+   "action": "relook",
+   "fingers": "keep",
+   "definition": "Ask the camera perception module to look again and refresh object/place estimates and whether the object is held.",
+   "refpoint": "tcp",
+   "status": "hypothesis",
+   "evidence": "cold-start prior"
+  },
+  {
+   "id": "finish@v0",
+   "name": "finish",
+   "action": "finish",
+   "fingers": "keep",
+   "definition": "The object was released at the place and the gripper retreated: stop.",
+   "refpoint": "tcp",
+   "status": "hypothesis",
+   "evidence": "cold-start prior"
+  }
+ ],
+ "predicates": [
+  {
+   "id": "above_grasp@v0",
+   "name": "above_grasp",
+   "expr": "dist_xy(tcp, grasp) < 0.3*obj_h and tcp[2] > grasp[2] + obj_h",
+   "meaning": "gripper is roughly above the grasp point",
+   "status": "hypothesis"
+  },
+  {
+   "id": "at_grasp@v0",
+   "name": "at_grasp",
+   "expr": "dist(tcp, grasp) < 0.25*obj_h",
+   "meaning": "gripper is at the grasp point",
+   "status": "hypothesis"
+  },
+  {
+   "id": "lifted@v0",
+   "name": "lifted",
+   "expr": "closed_cmd and tcp[2] > max(grasp[2], place[2]) + 2*obj_h",
+   "meaning": "closed gripper is raised well above grasp and place heights",
+   "status": "hypothesis"
+  },
+  {
+   "id": "above_place@v0",
+   "name": "above_place",
+   "expr": "dist_xy(vec(tcp[0] - grasp[0] + objc[0], tcp[1] - grasp[1] + objc[1], 0), place) < 0.3*obj_h",
+   "meaning": "held object is roughly above the place point",
+   "status": "hypothesis"
+  },
+  {
+   "id": "at_grasp_relaxed@hp",
+   "name": "at_grasp_relaxed",
+   "expr": "contact or (prev == 'descend_to_grasp' and n_same >= 2 and dist(tcp, grasp) < 0.6*obj_h)",
+   "meaning": "both fingers touch something, or the descent has stalled close to the grasp point",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "empty_close@hp",
+   "name": "empty_close",
+   "expr": "closed_cmd and n_close >= 1 and opening_at_close < 0.15*open_max and not contact",
+   "meaning": "the fingers closed on nothing",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "descent_hit@hp",
+   "name": "descent_hit",
+   "expr": "prev == 'descend_to_grasp' and not closed_cmd and (left_contact or right_contact) and not contact",
+   "meaning": "one finger hit something while descending with open fingers",
+   "status": "hypothesis",
+   "source": "human_prior"
+  }
+ ],
+ "recoveries": [
+  {
+   "id": "hp_descent_hit_relook",
+   "trigger": "descent_hit and n_relook < 2",
+   "force_intent": "relook",
+   "max_uses": 1,
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_empty_close_relook",
+   "trigger": "empty_close and prev != 'relook' and n_relook < 3",
+   "force_intent": "relook",
+   "max_uses": 2,
+   "status": "hypothesis",
+   "source": "human_prior",
+   "evidence": [
+    "object_t0_i0"
+   ]
+  },
+  {
+   "id": "hp_relaxed_at_grasp_close",
+   "trigger": "at_grasp_relaxed and not closed_cmd and not at_grasp and prev == 'descend_to_grasp'",
+   "force_intent": "close_gripper",
+   "max_uses": 3,
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "placement_contact_relook",
+   "trigger": "prev == 'lower_to_place' and closed_cmd and contact and not seen_held and not released and n_relook == 0",
+   "force_intent": "relook",
+   "max_uses": 1,
+   "status": "hypothesis",
+   "evidence": [
+    "object_t0_i0",
+    "object_t0_i1"
+   ]
+  },
+  {
+   "id": "contact_free_descent_relook",
+   "trigger": "prev == 'descend_to_grasp' and (n_same >= 2 or (n_close >= 1 and opening_at_close < 0.15*open_max and not seen_held)) and not closed_cmd and not left_contact and not right_contact and not at_grasp and n_relook < 3",
+   "force_intent": "relook",
+   "max_uses": 1,
+   "status": "hypothesis",
+   "evidence": [
+    "object_t1_i0",
+    "object_t4_i0"
+   ]
+  },
+  {
+   "id": "post_lift_opening_collapse_relook",
+   "trigger": "closed_cmd and not released and ever_contact and prev == 'lift' and opening < 0.15*open_max and opening < 0.5*opening_at_close and not left_contact and not right_contact and n_relook < 3",
+   "force_intent": "relook",
+   "max_uses": 1,
+   "status": "hypothesis",
+   "evidence": [
+    "object_t4_i2"
+   ]
+  },
+  {
+   "id": "narrow_contact_post_lift_relook",
+   "trigger": "prev == 'lift' and closed_cmd and not released and contact and opening < 0.15*open_max and opening < 0.5*opening_at_close and not seen_held and n_relook < 3",
+   "force_intent": "relook",
+   "max_uses": 1,
+   "status": "hypothesis",
+   "evidence": [
+    "spatial_t0_i0",
+    "spatial_t8_i1"
+   ]
+  },
+  {
+   "id": "post_release_retreat_relook",
+   "trigger": "prev == 'retreat' and released and not closed_cmd and n_relook < 3",
+   "force_intent": "relook",
+   "max_uses": 1,
+   "status": "hypothesis",
+   "evidence": [
+    "spatial_t0_i1"
+   ]
+  },
+  {
+   "id": "repeated_carry_unaligned_relook",
+   "trigger": "prev == 'carry_to_place' and n_same >= 2 and closed_cmd and not released and contact and seen_held and not above_place and n_relook < 3",
+   "force_intent": "relook",
+   "max_uses": 1,
+   "status": "hypothesis",
+   "evidence": [
+    "spatial_t0_i2"
+   ]
+  }
+ ],
+ "lessons": [
+  {
+   "id": "hp_a",
+   "name": "contact during descent",
+   "signature": "a finger touches something before the close while descending",
+   "instead": "stop descending and look again; the object was probably pushed or is blocked",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_b",
+   "name": "empty close after retry",
+   "signature": "a retry closes nearly empty without finger contact after an earlier close registered bilateral contact",
+   "instead": "refresh the grasp estimate before retrying; earlier contact does not establish that the object remains held or that its old grasp point remains valid",
+   "evidence": [
+    "object_t0_i1"
+   ],
+   "status": "scene-specific",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_c",
+   "name": "blocked target",
+   "signature": "the target object is occluded or hemmed in by neighbours",
+   "instead": "clear the path by pushing the blocker aside, or change the approach direction",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_d",
+   "name": "high release",
+   "signature": "the object is released far above the place surface",
+   "instead": "lower the object close to the place surface before opening",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_e",
+   "name": "strict at-grasp",
+   "signature": "descent stalls near the grasp point or both fingers already touch",
+   "instead": "Treat proximity or bilateral contact as grounds for a tentative close, then assess holding after lifting. The opening can collapse during lifting even while bilateral contact persists; neither contact nor the recorded opening at closure establishes secure retention. Refresh perception when these signals disagree, but a failed camera call leaves holding unresolved. Repeated narrow closures may indicate shallow engagement, as suggested by a fallback diagnosis, but do not establish a particular grasp depth or orientation correction.",
+   "evidence": [
+    "object_t1_i2",
+    "object_t4_i0",
+    "object_t4_i2",
+    "spatial_t8_i1"
+   ],
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "placement_contact_uncertainty",
+   "name": "contact during unsuccessful placement",
+   "signature": "placement lowering stalls or alternates with carrying while bilateral contact persists and the last camera report says the object is not held",
+   "instead": "refresh perception before assuming grasp failure; a fresh report can confirm holding despite the older negative report. Reassess placement using the refreshed target estimate; persistent lowering stalls alone do not establish grasp loss or justify release.",
+   "evidence": [
+    "object_t0_i0",
+    "object_t0_i1",
+    "object_t0_i2",
+    "object_t1_i0"
+   ],
+   "status": "verified"
+  },
+  {
+   "id": "placement_descent_lateral_drift",
+   "name": "lateral drift during placement descent",
+   "signature": "the object remains visibly captured while carrying and lowering repeat, and lowering loses estimated lateral alignment with the target",
+   "instead": "Assess placement motion before retrying the grasp. The sampled video shows retained capture and repeated motion above the target without release, while the recorded positions show lateral drift during lowering. Consider maintaining compensated target coordinates throughout descent instead of preserving the lateral position reached by the last carry. This correction remains untested; the evidence does not establish the cause of the drift or justify a grasp orientation change.",
+   "evidence": [
+    "object_t0_i2",
+    "object_t0_i0"
+   ],
+   "status": "hypothesis"
+  },
+  {
+   "id": "contact_free_descent_stall",
+   "name": "repeated descent without contact",
+   "signature": "open gripper descent repeats or alternates with moving above the grasp without reaching a close attempt and neither finger reports contact",
+   "instead": "Refresh grasp alignment and reassess depth and possible obstruction before repeating the approach. Alternating approach intents can evade a recovery that requires consecutive descents. Relooking can leave the stall unresolved, and absent finger contact does not establish a clear path. A forced close near the estimate has preceded both successful lifting and a failed grasp, so proximity alone does not validate holding or establish a need for a depth or orientation override.",
+   "evidence": [
+    "object_t1_i0",
+    "object_t1_i1",
+    "object_t1_i2",
+    "object_t4_i0"
+   ],
+   "status": "hypothesis"
+  },
+  {
+   "id": "retry_open_can_release_at_target",
+   "name": "retry opening can complete placement",
+   "signature": "after carrying and lowering over the target, bilateral contact persists while an older camera report says the object is not held",
+   "instead": "Do not interpret the older negative camera report as proof of grasp failure. Opening during a retry completed placement in the observed episode, so the retry label does not establish that another grasp was needed. Consider a deliberate release only after assessing target alignment and release height; success during retry opening does not validate its return motion or a general release rule for stalled lowering.",
+   "evidence": [
+    "object_t1_i2"
+   ],
+   "status": "scene-specific"
+  },
+  {
+   "id": "hp_wrong_object",
+   "name": "wrong object grasped",
+   "signature": "similar neighbours surround the goal object, and contact or a positive holding report conflicts with visual evidence about the intended object's identity",
+   "instead": "Check the captured object's identity against the instruction and surrounding landmarks before continuing transport. Bilateral contact and a positive holding report do not establish that the intended object was captured. The fallback reported a different object at the fingers and later reported no established capture; treat these as qualitative diagnoses rather than confirmed object identity. Refresh perception before regrasping; an identity check through relooking remains an untested remedy.",
+   "evidence": [
+    "spatial_t0_i0"
+   ],
+   "status": "scene-specific",
+   "source": "human_prior"
+  },
+  {
+   "id": "refresh_after_unsuccessful_release",
+   "name": "refresh before retrying after release",
+   "signature": "release and retreat complete without episode success, while the grasp estimate and holding report still come from before release",
+   "instead": "Refresh perception before returning to the old grasp point after an unsuccessful release. Holding reports from before opening are stale, and the object may have moved. Post-retreat relooking has produced changed grasp estimates and negative holding reports, but subsequent retries still failed. Estimated object alignment with the target does not establish official placement success, secure retention during the preceding lift, or a need to regrasp. The cause of placement failure remains unresolved.",
+   "evidence": [
+    "spatial_t0_i1",
+    "spatial_t8_i0",
+    "spatial_t8_i1"
+   ],
+   "status": "hypothesis"
+  },
+  {
+   "id": "lift_carry_cycle_with_holding",
+   "name": "repeated transport despite reported holding",
+   "signature": "lifting and carrying repeat while bilateral contact and a positive holding report persist, without reaching placement alignment",
+   "instead": "Treat repeated transport as unresolved motion or alignment uncertainty. A positive holding report does not establish that the carry target is reachable. Relooking after repeated carrying changed the place estimate and was followed by carrying and lowering in the latest episode, but release did not complete the task. Refreshing perception may help resume placement without establishing placement accuracy; do not infer grasp loss or a need for an orientation change from the cycle alone.",
+   "evidence": [
+    "spatial_t0_i2",
+    "spatial_t8_i0"
+   ],
+   "status": "hypothesis"
+  },
+  {
+   "id": "hp_near_approach_tips",
+   "name": "near approach tips tall object",
+   "signature": "approaching or descending too close to a tall bottle or can tips or pushes it before the grasp closes",
+   "instead": "keep a clear height above the body, center over it, then descend vertically",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_start_identity",
+   "name": "first-frame identity check",
+   "signature": "similar objects are nearby at episode start and the language names a specific one",
+   "instead": "match the language goal in the first image before locking grasp and place points",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_place_target_check",
+   "name": "place target may be wrong",
+   "signature": "after a successful lift the place region may still refer to the wrong container or surface for the language goal",
+   "instead": "verify the place region against the language goal before carrying and releasing",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_contact_not_held",
+   "name": "contact without held",
+   "signature": "both fingers report contact while the camera says the object is not held",
+   "instead": "do not reopen and regrasp yet; refresh perception before treating it as a grasp failure",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_push_not_goal",
+   "name": "do not push the goal",
+   "signature": "a push-aside clears a blocker near the target",
+   "instead": "push only the blocker; never push the language-goal object",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_wait_official_success",
+   "name": "wait for official success",
+   "signature": "the policy finishes or retries right after opening over the place region",
+   "instead": "success is only the official containment check; after release keep waiting for settle and the official success signal, do not finish early",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  }
+ ]
+}
