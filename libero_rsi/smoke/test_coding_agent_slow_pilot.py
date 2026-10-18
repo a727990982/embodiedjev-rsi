@@ -29,7 +29,7 @@ def main():
         slow_ctx={
             'intent_result': 'stalled',
             'predicates': {'descent_servo_stalled': True},
-            'hint': 'blocked_by_neighbour unilateral contact',
+            'neighbour_observed': True,
         },
     )
     parsed, rec = CAS.call_monitor(ctx, mode='mock')

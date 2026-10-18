@@ -1,4 +1,4 @@
-"""Logic smoke: episode-start Great Wall plan (mock) → push_aside on neighbour prior; harness hooks."""
+"""Logic smoke: episode-start Great Wall plan (mock) → push_aside on observed neighbour with confirmed identity; harness hooks."""
 import json
 import os
 import sys
@@ -25,7 +25,7 @@ def main():
     assert CAS.start_plan_backend_mode('') == 'off'
     os.environ['CODING_AGENT_SLOW'] = 'mock'
 
-    # 1) Neighbour prior in experience_brief → push_aside lead
+    # 1) Observed neighbour + confirmed identity → push_aside lead
     brief = {
         'lessons': [{
             'when': 'at episode start a neighbouring object sits close to the language-goal grasp',
@@ -38,6 +38,7 @@ def main():
         experience_brief=brief,
         start_hints={
             'goal_id_confirmed': True,
+            'neighbour_observed': True,
             'neighbour_prior': 'If neighbour may collide, plan push_aside before approach.',
         },
         keyframe_paths=[],
@@ -82,7 +83,7 @@ def main():
     assert p3['plan'] and p3['plan'][0]['step'] == 'relook'
     assert p3['step1_must'] == 'relook'
 
-    # 3b) Soft-unsure + neighbour prior → still push_aside (not relook-only)
+    # 3b) Soft-unsure + neighbour prior → relook, without inventing identity
     ctx3b = CAS.pack_start_context(
         lang='pick up the cream cheese and place it in the basket',
         experience_brief=brief,
@@ -94,8 +95,9 @@ def main():
         },
     )
     p3b, _ = CAS.call_start_plan(ctx3b, mode='mock')
-    assert p3b['plan'][0]['step'] == 'push_aside', p3b
-    assert p3b['step1_must'] == 'push_aside'
+    assert p3b['plan'][0]['step'] == 'relook', p3b
+    assert p3b['step1_must'] == 'relook'
+    assert p3b['matched_language_goal'] is None
 
     # 3c) Multi-object language → two place cycles ending in retreat
     ctx_multi = CAS.pack_start_context(

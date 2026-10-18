@@ -164,7 +164,7 @@
  "lessons": [
   {
    "id": "rsi_r1_evidence",
-   "name": "round-1 acceptance",
+   "name": "round-one acceptance",
    "signature": "train eval",
    "instead": "",
    "evidence": "seed 1/15 -> 3/15 on train",

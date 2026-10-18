@@ -1,7 +1,7 @@
 """Coding-agent mid-episode monitor + episode-start "Great Wall" planner.
 
 Replaces or dual-runs Astra slow-think with a coding-agent style monitor that
-reads text context (diag lines, experience_brief, PATCH/GOAL_ID) plus optional
+reads text context (policy decision lines, experience_brief, PATCH/GOAL_ID) plus optional
 keyframe still paths, and returns the SAME episode-plan JSON the harness already
 applies via `_apply_episode_plan`.
 
@@ -251,8 +251,17 @@ def mock_intervene(ctx: Dict[str, Any]) -> Dict[str, Any]:
     slow = ctx.get('slow_ctx') or {}
     preds = (slow.get('predicates') or {}) if isinstance(slow, dict) else {}
     last = str(slow.get('intent_result') or '')
-    brief = json.dumps(ctx.get('experience_brief') or '', ensure_ascii=False).lower()
-    blob = (trigger + ' ' + brief + ' ' + last + ' ' + json.dumps(preds) + ' ' + json.dumps(slow)[:800]).lower()
+    # Never treat a field name, a false predicate, or an instruction as evidence.
+    blob = (trigger + ' ' + last + ' ' + ' '.join(k for k, v in preds.items() if v is True)).lower()
+    goal_id = (ctx.get('patch_goal') or {}).get('goal_id')
+    confirmed = goal_id.get('confirmed') if isinstance(goal_id, dict) else goal_id
+    if confirmed is not True:
+        return {
+            'matched_language_goal': None, 'is_goal_object': None,
+            'issue': 'wrong_object', 'intervene': True,
+            'diagnosis': 'mock: identity unverified — relook before contact',
+            'lesson': 'Verify target identity before contact.', 'plan': [{'step': 'relook'}],
+        }
 
     # Confirmed grasp (harness proprio+lift): do not undo with push_aside / retreat
     if isinstance(slow, dict) and (slow.get('grasp_secured') or slow.get('grasp_confirm')):
@@ -269,7 +278,7 @@ def mock_intervene(ctx: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     # After local-deadend global relook: do NOT keep proposing push_aside
-    if 'local_deadend' in blob or 'global_relook' in blob:
+    if slow.get('local_deadend_global_relook') is True or 'local_deadend' in trigger:
         return {
             'goal_object_where': 'language goal after global front relook',
             'held_or_between_fingers': 'nothing',
@@ -287,7 +296,7 @@ def mock_intervene(ctx: Dict[str, Any]) -> Dict[str, Any]:
         max_push = int(slow.get('max_push_aside') or 2) if isinstance(slow, dict) else 2
     except Exception:
         n_push, max_push = 0, 2
-    if n_push >= max_push and any(k in blob for k in ('neighbour', 'blocked_by_neighbour', 'push_aside')):
+    if n_push >= max_push:
         return {
             'goal_object_where': 'language goal; neighbour push budget exhausted',
             'held_or_between_fingers': 'nothing',
@@ -300,7 +309,7 @@ def mock_intervene(ctx: Dict[str, Any]) -> Dict[str, Any]:
             'plan': [{'step': 'raise_redescend'}],
         }
 
-    if any(k in blob for k in ('neighbour', 'blocked_by_neighbour', 'push_aside', 'unilateral', 'hemmed')):
+    if slow.get('neighbour_observed') is True:
         return {
             'goal_object_where': 'language goal near neighbourhood clutter',
             'held_or_between_fingers': 'nothing',
@@ -450,7 +459,10 @@ def call_monitor(
         raise RuntimeError('coding_agent_slow_disabled')
     prompt = build_prompt(ctx)
     images = list(ctx.get('keyframe_paths') or [])
-    if mode in ('mock', 'dual'):
+    # dual runs Codex for comparison; the harness separately applies Astra.
+    if mode == 'dual':
+        mode = 'codex'
+    if mode == 'mock':
         raw = mock_intervene(ctx)
         ok, errs, norm = validate_intervention(raw)
         rec = {
@@ -526,7 +538,7 @@ def applicator_accepts(parsed: Dict[str, Any]) -> bool:
 
 # --- harness bridge helpers (imported only when CODING_AGENT_SLOW is on) ---
 
-def harness_call_from_slow(
+def prepare_slow_context(
     *,
     lang: str,
     trigger: str,
@@ -535,15 +547,14 @@ def harness_call_from_slow(
     patch: Dict[str, Any],
     goal_id: Any,
     ep_dir: str,
-    diag_path: Optional[str] = None,
-    mode: Optional[str] = None,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Entry used by run_ep_fbpatch when CODING_AGENT_SLOW != off."""
+    keyframe_paths: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """Capture policy-visible context on the caller thread. Never read simulator diagnostics."""
     try:
         slow_ctx = json.loads(slow_ctx_json) if isinstance(slow_ctx_json, str) else (slow_ctx_json or {})
     except json.JSONDecodeError:
         slow_ctx = {'raw': str(slow_ctx_json)[:2000]}
-    diag = recent_diag_from_file(diag_path, 30) if diag_path else []
+    diag = []
     # Also pull decision log if present next to ep_dir
     dec_log = str(Path(ep_dir) / 'decisions.jsonl')
     if Path(dec_log).is_file():
@@ -555,10 +566,16 @@ def harness_call_from_slow(
         experience_brief=experience_brief,
         patch=patch,
         goal_id=goal_id,
-        keyframe_paths=collect_keyframe_paths(ep_dir, 4),
+        keyframe_paths=list(keyframe_paths) if keyframe_paths is not None else collect_keyframe_paths(ep_dir, 4),
         slow_ctx=slow_ctx,
     )
-    return call_monitor(ctx, mode=mode)
+    # Detach nested dicts/lists from live harness state before starting a worker.
+    from copy import deepcopy
+    return deepcopy(ctx)
+
+
+def harness_call_from_slow(*, mode: Optional[str] = None, **kwargs):
+    return call_monitor(prepare_slow_context(**kwargs), mode=mode)
 
 
 # ---------------------------------------------------------------------------
@@ -852,8 +869,8 @@ Rules:
 - After EVERY place, include retreat (lift clear of container / leave rim) BEFORE the next approach. This is predictive clearance so the arm does not tip or scrape the place region — not something for mid-episode hard gates to invent later.
 - If language_goal names multiple objects / "both" / "and": phase_order MUST contain one complete cycle per object: (optional clear_neighbour) → approach → grasp → lift → place → retreat, then the next object… ending with a final retreat. Do not stop after the first place; do not omit the second place.
 - Mid-episode slow-think only fine-tunes; this start plan owns the long-horizon skeleton.
-- If a neighbour sits close enough that the OPEN gripper path or fingers may hit it before a clean bilateral grasp → set issue=blocked_by_neighbour, intervene=true, step1_must=push_aside (or clear_reapproach), phase_order MUST begin with clear_neighbour, and plan MUST LEAD with that step. Include blocker_px on the blocking body in the FRONT image when visible. Prefer this over relook-only when the language-goal object is visible even if the start identity gate is only unsure (set matched_language_goal=true when you can see it). Prefer push_aside over waiting for unilateral stall contact (predictive clearance).
-- Identity clearly mismatched / wrong lock → step1_must=relook, lead plan with relook. Soft-unsure + visible goal + neighbour block → push_aside first (not relook-only).
+- If a neighbour sits close enough that the OPEN gripper path or fingers may hit it before a clean bilateral grasp → set issue=blocked_by_neighbour, intervene=true, step1_must=push_aside (or clear_reapproach), phase_order MUST begin with clear_neighbour, and plan MUST LEAD with that step. Include blocker_px on the blocking body in the FRONT image when visible. Clearance requires start_hints.goal_id_confirmed=true; otherwise lead with relook. Your match assertion does not override the identity gate.
+- Identity mismatched or unconfirmed → step1_must=relook, lead plan with relook. Conditional experience lessons are not observations of current clutter.
 - Clear path + identity OK + single object → intervene=false, plan=[], step1_must=approach or none, phase_order=["approach","grasp","lift","place","retreat"].
 - Episode-only: do not invent library edits or scene-specific absolute yaw angles.
 - No object-brand hardcodes in lesson text.
@@ -1063,15 +1080,12 @@ def validate_start_plan(
 
 
 def mock_start_plan(ctx: Dict[str, Any]) -> Dict[str, Any]:
-    """Deterministic start plan: neighbour prior / hints → push_aside first; else approach.
+    """Deterministic start plan: observed blocker + confirmed identity → push_aside.
 
     Always ends each place with retreat. Multi-object language ("both" / " and ")
     gets a second approach→grasp→lift→place→retreat cycle so mock tests match Codex intent.
     """
-    brief = json.dumps(ctx.get('experience_brief') or '', ensure_ascii=False).lower()
     hints = ctx.get('start_hints') or {}
-    hints_blob = json.dumps(hints, ensure_ascii=False).lower()
-    blob = brief + ' ' + hints_blob
     lang = str(ctx.get('language_goal') or '')
     multi = _lang_multi_object_cues(lang)
     cycle = _default_object_cycle()
@@ -1080,25 +1094,19 @@ def mock_start_plan(ctx: Dict[str, Any]) -> Dict[str, Any]:
     def _phases(*prefix: str) -> List[str]:
         return list(prefix) + list(cycle) + second
 
-    neighbour = any(k in blob for k in (
-        'neighbour', 'neighbor', 'hemmed', 'blocked_by_neighbour', 'push_aside',
-        'clear the path', 'occluded', 'clutter', 'close enough', 'may collide',
-        'neighbour_block', 'blocker',
-    ))
-    # Identity clearly wrong → relook. Soft-unverified (gate False but matched not False)
-    # still allows neighbour clearance when clutter prior fires (cream-like layouts).
+    # Conditional lessons and instructional hints are priors, not scene observations.
+    neighbour = hints.get('neighbour_observed') is True
     id_ok = hints.get('goal_id_confirmed')
     matched = hints.get('identity_matched')
     verify = hints.get('verify_confirmed')
     clearly_bad = (
         matched is False or str(matched).lower() == 'false'
         or verify is False or str(verify).lower() == 'false'
-        or any(k in blob for k in ('wrong_object', 'unmatched_hard'))
     )
-    if clearly_bad and not neighbour:
+    if clearly_bad or id_ok is not True:
         return {
-            'matched_language_goal': False,
-            'issue': 'wrong_object',
+            'matched_language_goal': False if clearly_bad else None,
+            'issue': 'wrong_object' if clearly_bad else 'other',
             'intervene': True,
             'predicted_risks': ['identity_ambiguous'],
             'step1_must': 'relook',
@@ -1120,8 +1128,7 @@ def mock_start_plan(ctx: Dict[str, Any]) -> Dict[str, Any]:
         if blocker:
             step['blocker_px'] = blocker
         return {
-            # Assert match so harness can confirm GOAL_ID for clearance (soft-unsure gate).
-            'matched_language_goal': False if (matched is False or verify is False) else True,
+            'matched_language_goal': True,
             'issue': 'blocked_by_neighbour',
             'intervene': True,
             'predicted_risks': ['neighbour_block'],
@@ -1133,19 +1140,6 @@ def mock_start_plan(ctx: Dict[str, Any]) -> Dict[str, Any]:
             ),
             'lesson': 'When a neighbour may block the grasp path, push aside or clear before approaching.',
             'plan': [step],
-        }
-    # Soft-unsure identity (gate not confirmed), no neighbour prior → relook rather than blind approach
-    if id_ok is False:
-        return {
-            'matched_language_goal': None,
-            'issue': 'other',
-            'intervene': True,
-            'predicted_risks': ['identity_ambiguous'],
-            'step1_must': 'relook',
-            'phase_order': _phases('relook'),
-            'diagnosis': 'mock: start identity soft-unsure — relook before approach',
-            'lesson': 'When start identity is unsure and no neighbour clearance is needed, relook before approach.',
-            'plan': [{'step': 'relook'}],
         }
     return {
         'matched_language_goal': True if id_ok is not False else None,
@@ -1161,6 +1155,19 @@ def mock_start_plan(ctx: Dict[str, Any]) -> Dict[str, Any]:
         'lesson': '',
         'plan': [],
     }
+
+
+def gate_start_plan(plan: Dict[str, Any], confirmed: bool) -> Dict[str, Any]:
+    """Planning assertions cannot authorize contact with an unverified target."""
+    out = dict(plan)
+    match = out.get('matched_language_goal')
+    if confirmed is not True or match is False or str(match).lower() == 'false':
+        out.update(intervene=True, step1_must='relook', plan=[{'step': 'relook'}],
+                   matched_language_goal=False if match is False else None,
+                   issue='wrong_object' if match is False else 'other')
+        out['phase_order'] = ['relook'] + [p for p in out.get('phase_order', []) if p not in ('relook', 'clear_neighbour')]
+        out['predicted_risks'] = list(dict.fromkeys(list(out.get('predicted_risks') or []) + ['identity_ambiguous']))
+    return out
 
 
 def call_start_plan(

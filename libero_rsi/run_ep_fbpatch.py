@@ -1,5 +1,5 @@
 """LIBERO honest adapter + RSI library policy (Astra perception, Jev intent choice, typed rule library).
-python run_ep.py SUITE TID INIT LIBRARY.json OUTDIR [nofallback]
+python libero_rsi/run_ep_fbpatch.py SUITE TID INIT LIBRARY.json OUTDIR [nofallback]
 Policy-visible signals (documented in ADAPTER.md):
   proprioception: robot0_eef_pos (tcp), gripper finger qpos -> opening, last gripper command (closed_cmd)
   tactile proxy: per-finger contact flags from MuJoCo contact list (finger pad/collision geoms of gripper0 touching any
@@ -24,7 +24,7 @@ Hard local-deadend rule: repeated local stall family (push_aside/clear_reapproac
 Place-phase: after carry_to_place reached, N consecutive lower_to_place stall/timeout (MAX_PLACE_LOWER_STALL) or M lift↔lower cycles (MAX_PLACE_LIFT_LOWER_CYCLES) while TCP/held XY is over the place region → force open_gripper (log place_force_release); avoid endless lift↔lower thrash over basket.
 Freshness/isolation: each async slow-think job has a unique job_id + private result_box (abandoned workers cannot overwrite a newer job); after keypoint refresh, close is blocked until TCP re-approaches the new grasp XY; recovery mutations recompute namespace/facts before execute and spectator.
 """
-import os, sys, json, time, gc, re, threading
+import os, sys, json, time, gc, re, threading, queue
 os.environ.setdefault('MUJOCO_GL', 'egl'); os.environ.setdefault('PYOPENGL_PLATFORM', 'egl')
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
@@ -36,7 +36,15 @@ for _extra in (
     if os.path.isdir(_extra):
         sys.path.insert(0, _extra)
 import numpy as np
-import astra_client as AC, jev_choice as JC, dsl_libero as dsl
+try:
+    import astra_client as AC, jev_choice as JC
+except ModuleNotFoundError as ex:
+    if ex.name not in ('astra_client', 'jev_choice'):
+        raise
+    raise SystemExit(f'Missing external client {ex.name}. See libero_rsi/ADAPTER.md; '
+                     'provide the bench clients via PYTHONPATH or libero_rsi/bench_common/.') from ex
+import dsl_libero as dsl
+from validate import validate
 import jev_experience as JX
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
@@ -64,6 +72,7 @@ STAGE_FAIL_N = int(os.environ.get('STAGE_FAIL_N', '3'))  # consecutive timeout/s
 FAIL_RESULTS = frozenset({'timeout', 'stalled'})
 OPEN_MAX = 0.08  # Panda gripper spec (robot spec, not scene)
 LIB = json.load(open(LIBP))
+validate(LIB)  # Reject invalid libraries before creating a simulator or making model calls.
 ASK_ASTRA_NAMES = frozenset({'ask_astra', 'consult_astra'})
 GATE_JEV = os.environ.get('GATE_JEV', '1') != '0'  # spectator Jev gate (旁观者清); 0 disables
 GATE_JEV_COOLDOWN = int(os.environ.get('GATE_JEV_COOLDOWN', '3'))  # min decisions between spectator Jev calls
@@ -222,7 +231,7 @@ def set_goal_id(confirmed, source, detail=None):
     GOAL_ID['confirmed'] = ok
     GOAL_ID['source'] = source
     GOAL_ID['detail'] = detail
-    GOAL_ID['events'].append({'confirmed': ok, 'source': source, 'detail': detail, 't': T[0] if 'T' in dir() else None})
+    GOAL_ID['events'].append({'confirmed': ok, 'source': source, 'detail': detail, 't': T[0]})
     return ok
 def goal_id_confirmed():
     return GOAL_ID.get('confirmed') is True
@@ -1827,7 +1836,7 @@ SLOW_JOB = {'thread': None, 'snap_dec': None, 'dep': None, 'both': None, 'intent
             'job_id': None, 'result_box': None}
 SLOW_JOB_SEQ = [0]  # monotonic generation for job_id
 SLOW_STALE_INTENTS = 1  # discard async if more than this many intents completed since snapshot
-SLOW_ORPHAN_COSTS = []  # completed-but-abandoned recs awaiting cost accounting
+SLOW_ORPHAN_COSTS = queue.SimpleQueue()  # completed abandoned boxes; consumed only on main thread
 
 def _next_slow_job_id():
     SLOW_JOB_SEQ[0] += 1
@@ -2030,7 +2039,7 @@ def _run_episode_start_plan():
         'neighbour_prior': (
             'If another object sits close to the grasp target so the open gripper may collide '
             'before a bilateral close, plan push_aside or clear_reapproach BEFORE the first approach. '
-            'Do not wait for stall contact. Soft-unsure identity + visible goal + neighbour → prefer push_aside.'
+            'Clearance requires confirmed identity; if identity is unsure, relook first.'
         ),
     }
     # Heuristic geometry hint (no object names): if grasp and a nearby body-sized offset — left to planner images.
@@ -2077,9 +2086,14 @@ def _run_episode_start_plan():
                         raise ValueError(f'astra_start_fallback_invalid:{errs}')
                 else:
                     raise
+        proposed_plan = parsed
+        if identity_fields(parsed)['matched_language_goal'] is False:
+            set_goal_id(False, 'episode_start_plan_rejected', identity_fields(parsed))
+        parsed = CAS.gate_start_plan(parsed, goal_id_confirmed())
         # Persist full artifact for RSI reflection
-        art = {'plan': parsed, 'rec': rec, 'start_hints': start_hints, 'mode': mode, 'experience_brief': brief}
-        json.dump(art, open(os.path.join(ep_dir, 'start_plan.json'), 'w'), indent=1, default=str)
+        art = {'plan': parsed, 'proposed_plan': proposed_plan, 'rec': rec, 'start_hints': start_hints, 'mode': mode, 'experience_brief': brief}
+        with open(os.path.join(ep_dir, 'start_plan.json'), 'w') as plan_file:
+            json.dump(art, plan_file, indent=1, default=str)
         EP['start_plan'] = parsed
         EP['start_plan_rec'] = {k: rec.get(k) for k in ('backend', 'wall_s', 'cost_usd', 'model', 'effort', 'validate_ok', 'validate_errs') if k in (rec or {})}
         out['plan'] = parsed
@@ -2093,58 +2107,16 @@ def _run_episode_start_plan():
         if parsed and parsed.get('intervene') and (parsed.get('plan') or []):
             if str(parsed.get('issue') or '') == 'blocked_by_neighbour':
                 EP['last_stall_issue'] = 'blocked_by_neighbour'
-            # Start planner already assessed identity+neighbour from stills. If it asserts
-            # matched_language_goal=True, confirm GOAL_ID so push_aside is not refused solely
-            # because the mark-verify gate stayed unsure (common on cluttered cream-like layouts).
-            mlg = parsed.get('matched_language_goal')
-            if mlg is True or str(mlg).lower() == 'true':
-                if not goal_id_confirmed():
-                    set_goal_id(True, 'episode_start_plan', {
-                        'matched_language_goal': True,
-                        'issue': parsed.get('issue'),
-                        'step1_must': parsed.get('step1_must'),
-                    })
-                    log(t=T[0], episode_start_plan_goal_id=True, confirmed=True,
-                        reason='start_plan_matched_language_goal')
-            elif not goal_id_confirmed() and (mlg is False or str(mlg).lower() == 'false'):
-                # Explicitly unmatched — cannot shove safely; demote push_aside → clear_reapproach.
-                plan = list(parsed.get('plan') or [])
-                demoted = []
-                for st in plan:
-                    if st.get('step') == 'push_aside':
-                        demoted.append({'step': 'clear_reapproach'})
-                    else:
-                        demoted.append(st)
-                if demoted and demoted != plan:
-                    parsed = dict(parsed); parsed['plan'] = demoted
-                    if parsed.get('step1_must') == 'push_aside':
-                        parsed['step1_must'] = 'clear_reapproach'
-                    log(t=T[0], episode_start_plan_demote=True,
-                        from_step='push_aside', to_step='clear_reapproach',
-                        reason='identity_explicitly_unmatched')
-            elif not goal_id_confirmed() and parsed.get('step1_must') == 'push_aside':
-                # Soft-unsure but start plan wants push: confirm from planner assertion if present,
-                # else still try push after a soft confirm when issue is blocked_by_neighbour.
-                if str(parsed.get('issue') or '') == 'blocked_by_neighbour':
-                    set_goal_id(True, 'episode_start_plan_soft', {
-                        'matched_language_goal': mlg, 'issue': parsed.get('issue'), 'soft': True,
-                    })
-                    log(t=T[0], episode_start_plan_goal_id=True, confirmed=True,
-                        reason='soft_neighbour_push')
-            # Apply executable steps (push_aside / clear / raise / …) before Jev approaches.
+            if not goal_id_confirmed():
+                # A planning assertion is not a keypoint/identity verification.
+                # Queue a real perception intent; _apply_episode_plan's relook is only a marker.
+                EP['force_next_intent'] = 'relook'
+                out['plan_done'] = ['relook_queued_identity_unconfirmed']
+                log(t=T[0], episode_start_plan_deferred=True, reason='identity_unconfirmed')
+                return out
             done = _apply_episode_plan(parsed, DEP0, source='episode_start')
             out['plan_done'] = done
             out['applied'] = True
-            # If push still refused identity, try one clear_reapproach so start plan is not a no-op.
-            if any('push_aside_refused_identity' in str(x) for x in done) and goal_id_confirmed() is False:
-                try:
-                    ns_fb, _ = namespace()
-                    det = _apply_stall_feedback(ns_fb, 'episode_start:push_refused_clear', action='clear_reapproach')
-                    done = list(done) + [f"fallback_clear:{det.get('action')}"]
-                    out['plan_done'] = done
-                except Exception as ex:
-                    done = list(done) + [f'fallback_clear_error:{ex}']
-                    out['plan_done'] = done
             log(t=T[0], episode_start_plan_applied=True, plan_done=done, patch=dict(PATCH))
             # After clearance, force re-approach above object (push_aside also sets this).
             if EP.get('force_next_intent') is None:
@@ -2292,63 +2264,62 @@ def _finish_slow(parsed, rec, dep, both, intent, result, mode, crit, snap_dec):
         'plan_done': done_steps})
     return 'intervened', out
 
-def _slow_worker(jpeg, prompt, meta, job_id, result_box, intent=None, result=None, crit=None, ctx=None):
-    """Write ONLY into the private result_box for this job_id. Never touch SLOW_JOB directly.
-    CODING_AGENT_SLOW=mock|codex replaces Astra; dual logs coding proposal then still calls Astra."""
+def _prepare_slow_snapshot(ctx, crit, phase, both, image_tag):
+    import coding_agent_slow as CAS
+    mode = CAS.backend_mode(CODING_AGENT_SLOW)
+    snapshot = {'mode': mode, 't': T[0], 'effort': ASTRA_EFFORT, 'coding_context': None}
+    if mode in ('mock', 'codex', 'dual'):
+        brief = JX.build_jev_experience_brief(LIB, facts={}, ns={}, uses=EP.get('uses') or {}, dsl=dsl)
+        # A unique file belongs to this request. No worker scans changing episode files.
+        frame = os.path.join(ep_dir, f'slow_input_{image_tag}.jpg')
+        Image.fromarray(both).save(frame)
+        snapshot['coding_context'] = CAS.prepare_slow_context(
+            lang=LANG, trigger=str(crit or phase), slow_ctx_json=ctx,
+            experience_brief=brief, patch=PATCH,
+            goal_id={'confirmed': goal_id_confirmed(), 'target': GOAL_TARGET},
+            ep_dir=ep_dir, keyframe_paths=[frame])
+    return snapshot
+
+
+def _slow_worker(jpeg, prompt, meta, job_id, result_box, snapshot):
+    """Use captured inputs only; publish results and log events into this job's private box."""
+    events = result_box.setdefault('events', [])
+    mode = snapshot['mode']
     try:
         import coding_agent_slow as CAS
-        mode = CAS.backend_mode(CODING_AGENT_SLOW)
-        coding_rec = None
-        coding_parsed = None
+        coding_rec = coding_parsed = None
         if mode in ('mock', 'codex', 'dual'):
             try:
-                brief = None
-                try:
-                    brief = JX.build_jev_experience_brief(LIB, facts={}, ns={}, uses={}, dsl=dsl)
-                except Exception:
-                    brief = EP.get('experience_brief')
-                coding_parsed, coding_rec = CAS.harness_call_from_slow(
-                    lang=LANG, trigger=str(crit or meta.get('phase') or 'slow'),
-                    slow_ctx_json=ctx if isinstance(ctx, str) else json.dumps(ctx or {}, default=str),
-                    experience_brief=brief, patch=dict(PATCH),
-                    goal_id={'confirmed': goal_id_confirmed(), 'target': dict(GOAL_TARGET)},
-                    ep_dir=ep_dir,
-                    diag_path=(DIAGF.name if DIAGF else None),
-                    mode=('mock' if mode == 'dual' else mode),
-                )
-                try:
-                    log(t=T[0], coding_agent_slow=True, mode=mode, job_id=job_id,
-                        issue=(coding_parsed or {}).get('issue'),
-                        intervene=(coding_parsed or {}).get('intervene'),
-                        plan=(coding_parsed or {}).get('plan'),
-                        backend=(coding_rec or {}).get('backend'))
-                except Exception:
-                    pass
+                coding_parsed, coding_rec = CAS.call_monitor(snapshot['coding_context'], mode=mode)
+                events.append(dict(t=snapshot['t'], coding_agent_slow=True, mode=mode, job_id=job_id,
+                    issue=coding_parsed.get('issue'), intervene=coding_parsed.get('intervene'),
+                    plan=coding_parsed.get('plan'), backend=coding_rec.get('backend')))
             except Exception as ce:
                 coding_rec = {'backend': mode, 'err': str(ce)}
-                try:
-                    log(t=T[0], coding_agent_slow_error=True, mode=mode, err=str(ce)[:300])
-                except Exception:
-                    pass
+                events.append(dict(t=snapshot['t'], coding_agent_slow_error=True,
+                                   mode=mode, job_id=job_id, err=str(ce)[:300]))
                 if mode in ('mock', 'codex'):
                     raise
         if mode in ('mock', 'codex') and coding_parsed is not None:
-            parsed, rec = coding_parsed, coding_rec or {'cost_usd': 0.0, 'backend': mode}
+            parsed, rec = coding_parsed, coding_rec
         else:
-            parsed, rec = AC.call(jpeg, prompt, meta, effort=ASTRA_EFFORT)
-            if coding_parsed is not None and isinstance(rec, dict):
-                rec = dict(rec)
-                rec['coding_dual'] = {
-                    'issue': coding_parsed.get('issue'),
-                    'intervene': coding_parsed.get('intervene'),
-                    'plan': coding_parsed.get('plan'),
-                    'backend': (coding_rec or {}).get('backend'),
-                }
+            parsed, rec = AC.call(jpeg, prompt, meta, effort=snapshot['effort'])
+            rec = dict(rec)
+            if coding_rec is not None:
+                rec['coding_dual'] = {'proposal': coding_parsed, 'rec': coding_rec}
         result_box['parsed'], result_box['rec'] = parsed, rec
     except Exception as e:
         result_box['err'] = e
     finally:
         result_box['done'] = True
+
+
+def _log_slow_result(box):
+    # Called only after joining/checking completion, on the main thread.
+    if box:
+        for event in box.pop('events', []):
+            log(**event)
+
 
 def _account_slow_rec(rec):
     if not rec:
@@ -2361,9 +2332,15 @@ def _account_slow_rec(rec):
         pass
 
 def _drain_orphan_slow_costs():
-    while SLOW_ORPHAN_COSTS:
-        rec = SLOW_ORPHAN_COSTS.pop(0)
+    while True:
+        try:
+            box, info = SLOW_ORPHAN_COSTS.get_nowait()
+        except queue.Empty:
+            break
+        _log_slow_result(box)
+        rec = (box or {}).get('rec')
         _account_slow_rec(rec)
+        log(t=T[0], async_abandoned=True, **info, had_rec=bool(rec))
 
 def _clear_slow_job():
     """Drop current ownership pointers. Does not revoke a worker's private result_box (already detached on abandon)."""
@@ -2386,16 +2363,11 @@ def _abandon_async_slow(reason='abandon'):
     if th is not None and th.is_alive():
         def _orphan_join(t=th, result_box=box, info=meta):
             t.join()
-            rec = (result_box or {}).get('rec') if result_box else None
-            if rec:
-                SLOW_ORPHAN_COSTS.append(rec)
-            try:
-                log(t=T[0], async_abandoned=True, **info, had_rec=bool(rec))
-            except Exception:
-                pass
+            SLOW_ORPHAN_COSTS.put((result_box, info))
         threading.Thread(target=_orphan_join, daemon=True).start()
     elif box is not None:
         # Already finished: account cost, never apply
+        _log_slow_result(box)
         _account_slow_rec(box.get('rec'))
         try:
             log(t=T[0], async_discarded_finished=True, **meta, issue=(box.get('parsed') or {}).get('issue'))
@@ -2423,6 +2395,7 @@ def _poll_async_slow(wait=False, timeout=None):
     # Re-check ownership after join (abandon may have raced).
     if SLOW_JOB.get('job_id') != job_id or SLOW_JOB.get('result_box') is not box:
         return 'async_abandoned_race', {'job_id': job_id}
+    _log_slow_result(box)
     snap_dec = SLOW_JOB['snap_dec']; stale = dec - snap_dec
     err = box.get('err')
     intent, result = SLOW_JOB['intent'], SLOW_JOB['result']
@@ -2459,10 +2432,11 @@ def _launch_async_slow(intent, result, crit=None, replace=False):
     meta = {**META, 'phase': 'slow_think_async'}
     job_id = _next_slow_job_id()
     result_box = _new_slow_result_box(job_id)
+    snapshot = _prepare_slow_snapshot(ctx, crit, meta['phase'], both, f'async_{job_id}')
     SLOW_JOB.update(snap_dec=dec, dep=dep.copy(), both=both.copy(), intent=intent, result=result,
                     mode='async', crit=crit, out=None, err=None, rec=None, parsed=None,
                     job_id=job_id, result_box=result_box)
-    th = threading.Thread(target=_slow_worker, args=(jpeg, prompt, meta, job_id, result_box, intent, result, crit, ctx), daemon=True)
+    th = threading.Thread(target=_slow_worker, args=(jpeg, prompt, meta, job_id, result_box, snapshot), daemon=True)
     SLOW_JOB['thread'] = th; th.start()
     return 'async_launched', {'snap_dec': dec, 'intent': intent, 'crit': crit, 'job_id': job_id}
 
@@ -2475,6 +2449,7 @@ def _sync_slow(intent, result, crit):
         if th is not None and not th.is_alive():
             # Finished but we intentionally discard (account cost, no apply)
             box = SLOW_JOB.get('result_box') or {}
+            _log_slow_result(box)
             _account_slow_rec(box.get('rec') or SLOW_JOB.get('rec'))
             _clear_slow_job()
         else:
@@ -2490,17 +2465,8 @@ def _sync_slow(intent, result, crit):
         coding_parsed = coding_rec = None
         if mode in ('mock', 'codex', 'dual'):
             try:
-                try:
-                    brief = JX.build_jev_experience_brief(LIB, facts={}, ns={}, uses={}, dsl=dsl)
-                except Exception:
-                    brief = None
-                coding_parsed, coding_rec = CAS.harness_call_from_slow(
-                    lang=LANG, trigger=str(crit or 'sync'),
-                    slow_ctx_json=ctx, experience_brief=brief, patch=dict(PATCH),
-                    goal_id={'confirmed': goal_id_confirmed(), 'target': dict(GOAL_TARGET)},
-                    ep_dir=ep_dir, diag_path=(DIAGF.name if DIAGF else None),
-                    mode=('mock' if mode == 'dual' else mode),
-                )
+                snapshot = _prepare_slow_snapshot(ctx, crit, 'sync', both, f'sync_{_next_slow_job_id()}')
+                coding_parsed, coding_rec = CAS.call_monitor(snapshot['coding_context'], mode=mode)
                 log(t=T[0], coding_agent_slow=True, mode=mode, sync=True, crit=crit,
                     issue=(coding_parsed or {}).get('issue'),
                     intervene=(coding_parsed or {}).get('intervene'),
@@ -2943,7 +2909,12 @@ try:
                     log(dec=dec, t=T[0], shape_rule=rc['id'], rshape=dict(RSHAPE), patch_yaw=PATCH.get('yaw_deg'))
                 if 'force_intent' in rc and rc['force_intent'] in intents:
                     forced = rc['force_intent']; break
-            except Exception: pass
+            except Exception as ex:
+                log(dec=dec, t=T[0], recovery_error=rc.get('id'),
+                    error_type=type(ex).__name__, error=str(ex))
+                # A rule can fail after moving the arm or partially updating state.
+                # Stop this episode; continuing would use an unknown recovery state.
+                raise
         # B05: recovery mutates pose/PATCH — recompute ns/facts before selection and execute.
         if recovery_mutated:
             ns, preds = namespace(); f = facts(ns, preds)
@@ -3065,4 +3036,4 @@ print(json.dumps({k: res[k] for k in ('suite', 'task_id', 'init', 'success', 'en
 if VID: VID.stdin.close(); VID.wait()
 try: env.close()  # explicit EGL teardown (avoid __del__ EGLError at interpreter exit)
 except Exception: pass
-sys.stdout.flush(); logf.close(); os._exit(0)
+sys.stdout.flush(); logf.close(); os._exit(1 if end == 'harness_error' else 0)

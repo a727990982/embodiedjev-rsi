@@ -19,7 +19,9 @@ Public snapshot of the LIBERO RSI / EmbodiedJev harness. This repo had no prior 
 
 Before the first approach the planner reads `experience_brief` and writes one ordered skeleton (`start_plan.json`). `phase_order` is a full cycle per language-goal object: approach → grasp → lift → place → **retreat**, then the next object, ending with a retreat. Retreat after every place is filled in if the model omits it. Mid-episode slow-think only fine-tunes that skeleton.
 
-`mock` is deterministic from the brief and start hints (neighbour prior → `push_aside` first). `codex` calls the Codex CLI. `astra` is applied by the harness client, not by this module.
+`mock` uses explicit start observations: `neighbour_observed=true` plus confirmed identity permits `push_aside`; conditional lessons and neighbour priors alone do not. Unknown or rejected identity leads to `relook`. `codex` calls the Codex CLI. `astra` is applied by the harness client.
+
+The start planner cannot confirm target identity. Its proposed plan and the gated executable plan are both saved in `start_plan.json`. When the identity gate is unconfirmed, the harness queues a real `relook` intent before contact, even if the planner claims a match.
 
 ## Local dead-end → synchronous global relook
 
@@ -41,20 +43,40 @@ During place, consecutive `lower_to_place` stalls (`MAX_PLACE_LOWER_STALL`, defa
 
 | Env | `0` / unset | `mock` | `codex` | other |
 |---|---|---|---|---|
-| `CODING_AGENT_SLOW` | Astra slow-think | local monitor | Codex monitor | `dual` logs Codex (or mock) and still applies Astra |
+| `CODING_AGENT_SLOW` | Astra slow-think | local monitor | Codex monitor | `dual` calls Codex for logging and still applies Astra; Codex errors are logged and Astra continues |
 | `CODING_AGENT_PERCEIVE` | Astra keypoints | local keypoints | Codex keypoints | off |
 | `EPISODE_START_PLAN` | inherit, else off | local start plan | Codex start plan | `astra` uses the harness client |
 
 Codex looks up `codex` on `PATH`, or `CODING_AGENT_CODEX_BIN`. A proxy is used only when `CODING_AGENT_HTTP_PROXY` or `CODING_AGENT_SOCKS` is set. Do not commit proxy URLs, keys, or host details.
+
+Async slow-think captures a detached copy of policy state and a unique image before starting its worker. Workers return results and log events in private job boxes; the main thread writes the decision log. Simulator diagnostic files are never passed to the coding monitor, including when `DIAG` is enabled.
+
+## Running an episode
+
+This snapshot does **not** include `astra_client` or `jev_choice`. Actual rollouts require those external clients, LIBERO with its assets, MuJoCo/robosuite, and rendering dependencies. The client interfaces and policy/diagnostic boundary are documented in [libero_rsi/ADAPTER.md](libero_rsi/ADAPTER.md). Setting the coding backends to `mock` does not make the full harness offline: identity verification and Jev execution still need the clients.
+
+Once the external dependencies are installed:
+
+```bash
+PYTHONPATH=/path/to/bench/common python libero_rsi/run_ep_fbpatch.py SUITE TID INIT LIB.json OUTDIR
+```
+
+Libraries are validated before environment creation. Recovery-rule errors are logged and end the episode with `harness_error`, rather than silently continuing with potentially partial state changes.
 
 ## Smoke tests
 
 From the repo root (Python 3; `numpy` for the tests that import it):
 
 ```bash
+failed=0
 for t in libero_rsi/smoke/test_*.py; do
-  python "$t" || echo "FAIL $t"
+  python "$t" || failed=1
 done
+test "$failed" -eq 0
 ```
 
 Each test adds `libero_rsi/` to `sys.path`, so `validate` and `dsl_libero` resolve as siblings. `numpy` is required for the tests that import it. No simulator and no network.
+
+The regression suite executes selected production functions with environment/model doubles, covering identity authorization, observed versus prior clutter, dual routing, event timestamps, async snapshots, diagnostic isolation, recovery failures, and validation of every shipped library. These tests do not establish simulation success.
+
+`libs/smoke_copies/` contains duplicate library fixtures retained from the original snapshot; these are not independent policy variants or experimental results.
