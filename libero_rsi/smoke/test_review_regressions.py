@@ -39,6 +39,7 @@ class RegressionTests(unittest.TestCase):
                     JX=JX, LIB={'intents': [], 'lessons': []}, dsl=None,
                     EP=ep, GOAL_ID=gid, T=[37], START_ID={'final': {}, 'verify': {}}, per0={},
                     LANG='put object in basket', ep_dir=temp, log=lambda **kw: None,
+                    _account_slow_rec=lambda rec: None,
                     _apply_episode_plan=lambda *a, **kw: applied.append(a), DEP0=None)
                 with patch.object(CAS, 'harness_call_start_plan', return_value=(plan, {'backend': 'codex_start'})) as planner:
                     result = scope['_run_episode_start_plan']()
@@ -92,6 +93,7 @@ class RegressionTests(unittest.TestCase):
                 T=[5],
                 JX=SimpleNamespace(build_jev_experience_brief=lambda *a, **kw: {'lessons': ['prior']}),
                 LIB={}, dsl=None, EP={'uses': {}}, LANG='goal', PATCH=patch_state, GOAL_TARGET=target,
+                namespace=lambda: ({}, {}), facts=lambda *a: {}, FB_LESSONS=[],
                 goal_id_confirmed=lambda: True, ep_dir=temp,
                 Image=SimpleNamespace(fromarray=lambda image: SimpleNamespace(
                     save=lambda path: Path(path).write_bytes(b'test fixture'))),
@@ -133,8 +135,9 @@ class RegressionTests(unittest.TestCase):
     def test_async_launcher_wires_worker_with_fixed_codex_role(self):
         scope = functions('_launch_async_slow', '_slow_worker', '_next_slow_job_id', '_new_slow_result_box',
             threading=threading, time=SimpleNamespace(time=lambda: 20),
-            SLOW_JOB={}, SLOW_JOB_SEQ=[0], SLOW_MIN_GAP_S=5,
-            P={'slow': 0, 'last_astra_wall': 0}, MAX_SLOW=4, dec=2,
+            SLOW_JOB={}, SLOW_JOB_SEQ=[0], SLOW_MIN_GAP_S=5, GOAL_TARGET={'rev': 1},
+            EP={'closed': False}, goal_id_confirmed=lambda: True,
+            P={'slow': 0, 'last_planning_wall': 0}, MAX_SLOW=4, dec=2,
             _drain_orphan_slow_costs=lambda: None, _combo_rgb=lambda: ([], [], []),
             _slow_ctx=lambda *a: '{}',
             _prepare_slow_snapshot=lambda *a: {'t': 10, 'coding_context': {'captured': True}})

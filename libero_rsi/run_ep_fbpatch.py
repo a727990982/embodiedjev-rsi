@@ -11,7 +11,7 @@ Policy-visible signals (documented in ADAPTER.md):
          Priority: latest relook keypoints > slow-think patch on current target > episode-start perception.
          Relook / keypoint refresh overwrites PER and clears position offsets in PATCH; confirmed approach yaw/tilt in PATCH
          survive unless new keypoints explicitly change yaw (or identity-bad full reset). Slow-think / stall mutates PATCH only.
-         On stall with identity confirmed: must update the shared target (raise/shift/relook-refresh); empty relook-only forbidden.
+         On stall with identity confirmed: must update the shared target (raise/shift/relook-refresh); relook executes fresh perception.
   success: official env (BDDL check_success) -> done flag. Binary only, ends the episode.
 No simulator object/target ground-truth poses reach the policy.
 Jev state includes experience_brief: short actionable recoveries (when→prefer) + relevant lessons (when→instead), not a full prose dump; general triggers only.
@@ -66,7 +66,7 @@ MAX_PLACE_LIFT_LOWER_CYCLES = int(os.environ.get('MAX_PLACE_LIFT_LOWER_CYCLES', 
 PLACE_XY_M = float(os.environ.get('PLACE_XY_M', '0.04'))  # held-object XY near place → allow force release
 PLACE_CLEARANCE_DEFAULT = float(os.environ.get('PLACE_CLEARANCE_DEFAULT', '0.05'))  # default place_clearance_m if Astra omits
 ASTRA_EFFORT = os.environ.get('ASTRA_EFFORT', 'xhigh')  # Astra perception/identity effort through Codex CLI
-SLOW_MIN_GAP_S = float(os.environ.get('SLOW_MIN_GAP_S', '5'))  # skip if last Astra call was more recent (unless fallback)
+SLOW_MIN_GAP_S = float(os.environ.get('SLOW_MIN_GAP_S', '5'))  # gap between completed Codex planning calls (unless critical)
 STAGE_FAIL_N = int(os.environ.get('STAGE_FAIL_N', '3'))  # consecutive timeout/stall + unchanged gripper -> sync slow-think
 FAIL_RESULTS = frozenset({'timeout', 'stalled'})
 OPEN_MAX = 0.08  # Panda gripper spec (robot spec, not scene)
@@ -186,7 +186,8 @@ def bp(uv, dep):
     u, v = int(np.clip(round(uv[0]), 2, S - 3)), int(np.clip(round(uv[1]), 2, S - 3))
     d = float(np.median(dep[v - 2:v + 3, u - 2:u + 3])); return CP + RM @ np.array([(uv[0] - S / 2) / F, -(uv[1] - S / 2) / F, -1.0]) * d
 
-P = {'astra_cost': 0.0, 'astra_calls': 0, 'relook': 0, 'fb': 0, 'slow': 0, 'last_astra_wall': 0.0}
+P = {'astra_cost': 0.0, 'astra_calls': 0, 'relook': 0, 'fb': 0, 'slow': 0, 'last_astra_wall': 0.0,
+     'planning_calls': 0, 'planning_cost': 0.0, 'last_planning_wall': 0.0}
 ID_EVENTS = []  # identity checks at start / relook / fallback (policy-visible reflection evidence)
 def identity_fields(p):
     m = p.get('matched_language_goal')
@@ -252,6 +253,7 @@ def _reset_patch(reason='relook_overwrite'):
     Approach yaw/tilt may be restored by _commit_keypoints after a relook overwrite."""
     old = {k: (list(v) if isinstance(v, list) else v) for k, v in PATCH.items()}
     PATCH.clear(); PATCH.update(_empty_patch())
+    GOAL_TARGET['rev'] = int(GOAL_TARGET.get('rev', 0)) + 1
     try:
         log(t=T[0], patch_reset=True, reason=reason, old_patch=old, goal_target=dict(GOAL_TARGET))
     except Exception:
@@ -1718,9 +1720,11 @@ def push_aside(st, dep):
 # Abandoned workers may finish later but MUST NOT write into a newer job's slot (B01).
 SLOW_JOB = {'thread': None, 'snap_dec': None, 'dep': None, 'both': None, 'intent': None, 'result': None,
             'mode': None, 'crit': None, 'out': None, 'err': None, 'rec': None, 'parsed': None,
-            'job_id': None, 'result_box': None}
+            'job_id': None, 'result_box': None, 'target_rev': None, 'closed': None,
+            'n_close': None, 'goal_confirmed': None}
 SLOW_JOB_SEQ = [0]  # monotonic generation for job_id
 SLOW_STALE_INTENTS = 1  # discard async if more than this many intents completed since snapshot
+SLOW_ORPHAN_WAITERS = []
 SLOW_ORPHAN_COSTS = queue.SimpleQueue()  # completed abandoned boxes; consumed only on main thread
 
 def _next_slow_job_id():
@@ -1738,7 +1742,7 @@ def _combo_rgb():
 def _apply_episode_plan(p, dep, source='slow'):
     """Apply episode-only plan steps from Codex.
     Single shared goal: keypoint refresh overwrites PER+clears position PATCH; approach yaw/tilt preserved unless new yaw explicit; adjust/stall mutates PATCH only.
-    On stall with identity confirmed: empty relook-only is forbidden — must update the shared target."""
+    On stall with identity confirmed: relook must run perception; never treat a log marker as a target refresh."""
     def f(d_, k, lo, hi, d):
         try: return float(np.clip(float(d_[k]), lo, hi))
         except Exception: return d
@@ -1784,7 +1788,7 @@ def _apply_episode_plan(p, dep, source='slow'):
         # Keep goal identity; ensure plan has a non-relook feedback step.
         plan = list(p.get('plan') or [])
         stall_ok = ('raise_redescend', 'lateral_recenter', 'change_approach_yaw', 'confirm_contact', 'clear_reapproach', 'push_aside', 'adjust')
-        if not any(st.get('step') in stall_ok for st in plan):
+        if not any(st.get('step') in stall_ok or st.get('step') == 'relook' for st in plan):
             # Neighbour block → prefer push_aside (blocker_px used if later present); else raise.
             if issue == 'blocked_by_neighbour' and goal_id_confirmed():
                 default_step = 'push_aside'
@@ -1798,12 +1802,8 @@ def _apply_episode_plan(p, dep, source='slow'):
     has_kp = any(k in p for k in ('grasp_px', 'object_center_px', 'place_px'))
     target_updated = False
     if has_kp:
-        try:
-            # Keypoint refresh = relook priority: overwrite shared base, clear old offsets.
-            _commit_keypoints(p, dep, f'{source}_keypoints', held_now=bool(p.get('object_held_by_gripper')) and EP['closed'])
-            set_goal_id(identity_ok(p), f'{source}_keypoints', PER.get('identity'))
-            target_updated = True
-        except Exception: pass
+        # A planning reply is not a perception result; refresh using the visual model.
+        return [f"relook:{do_relook(f'{source}:planner_keypoints')}"]
     done_steps = []
     stall_steps = {'raise_redescend', 'lateral_recenter', 'change_approach_yaw', 'confirm_contact', 'clear_reapproach'}
     id_ok = goal_id_confirmed()
@@ -1835,14 +1835,10 @@ def _apply_episode_plan(p, dep, source='slow'):
             except Exception as ex:
                 done_steps.append(f'push_aside_error:{ex}')
         elif k == 'relook':
-            # Identity confirmed + stall: bare relook without keypoints does not update the shared target — forbid.
-            if id_ok and stallish and not has_kp:
-                done_steps.append('relook_skipped_empty_confirmed_stall')
-            else:
-                done_steps.append('relook')
-                # keypoints already committed above count as relook-refresh; otherwise a later do_relook may run.
-                if has_kp:
-                    target_updated = True
+            # A real visual refresh replaces the old target. Remaining plan steps were
+            # based on the old view, so return to Jev with a fresh namespace afterward.
+            done_steps.append(f"relook:{do_relook(f'{source}:plan')}")
+            return done_steps
     # Stall + identity confirmed ⇒ shared target MUST change (raise/shift/relook-refresh). Empty relook-only forbidden.
     if id_ok and stallish and not target_updated:
         try:
@@ -1936,6 +1932,7 @@ def _run_episode_start_plan():
         parsed, rec = CAS.harness_call_start_plan(
             lang=LANG, experience_brief=brief, start_hints=start_hints,
             ep_dir=ep_dir, image_paths=images, mode='codex')
+        _account_slow_rec(rec)
         proposed_plan = parsed
         if identity_fields(parsed)['matched_language_goal'] is False:
             set_goal_id(False, 'episode_start_plan_rejected', identity_fields(parsed))
@@ -1959,7 +1956,7 @@ def _run_episode_start_plan():
                 EP['last_stall_issue'] = 'blocked_by_neighbour'
             if not goal_id_confirmed():
                 # A planning assertion is not a keypoint/identity verification.
-                # Queue a real perception intent; _apply_episode_plan's relook is only a marker.
+                # Queue a real perception intent before starting task motion.
                 EP['force_next_intent'] = 'relook'
                 out['plan_done'] = ['relook_queued_identity_unconfirmed']
                 log(t=T[0], episode_start_plan_deferred=True, reason='identity_unconfirmed')
@@ -2050,7 +2047,7 @@ def _slow_ctx(intent, result):
 
 def _finish_slow(parsed, rec, dep, both, intent, result, mode, crit, snap_dec):
     """Apply a finished Codex slow-think reply on the main thread (env-safe)."""
-    P['astra_cost'] += rec['cost_usd']; P['astra_calls'] += 1; P['last_astra_wall'] = time.time()
+    _account_slow_rec(rec)
     issue = str(parsed.get('issue') or 'ok')
     _igo = parsed.get('is_goal_object')
     if _igo is True or str(_igo).lower() == 'true': _igo_n = True
@@ -2073,7 +2070,7 @@ def _finish_slow(parsed, rec, dep, both, intent, result, mode, crit, snap_dec):
     elif stall_issue:
         parsed['intervene'] = True
         plan = list(parsed.get('plan') or [])
-        if not any(st.get('step') in ('raise_redescend', 'lateral_recenter', 'change_approach_yaw', 'confirm_contact', 'clear_reapproach', 'push_aside', 'adjust') for st in plan):
+        if not any(st.get('step') in ('raise_redescend', 'lateral_recenter', 'change_approach_yaw', 'confirm_contact', 'clear_reapproach', 'push_aside', 'adjust', 'relook') for st in plan):
             if issue == 'empty_grasp':
                 _def = 'raise_redescend'
             elif issue == 'blocked_by_neighbour' and goal_id_confirmed():
@@ -2093,15 +2090,13 @@ def _finish_slow(parsed, rec, dep, both, intent, result, mode, crit, snap_dec):
            'held_or_between_fingers': parsed.get('held_or_between_fingers'), 'mode': mode, 'crit': crit,
            'snap_dec': snap_dec, 'apply_dec': dec}
     if not intervene:
-        Image.fromarray(both).save(os.path.join(ep_dir, f'slow_ok_c{P["astra_calls"]}.jpg'))
+        Image.fromarray(both).save(os.path.join(ep_dir, f'slow_ok_c{P["planning_calls"]}.jpg'))
         ID_EVENTS.append({'where': 'slow_think', 'intent': intent, 'result': result, **{k: out[k] for k in
             ('issue', 'intervene', 'is_goal_object', 'goal_object_where', 'held_or_between_fingers', 'diagnosis', 'mode', 'crit')}})
         return 'ok', out
     if P['slow'] >= MAX_SLOW:
         out['intervene'] = False; return 'slow_cap_drop', out
     P['slow'] += 1
-    if P['relook'] < MAX_RELOOK and any(k in parsed for k in ('grasp_px', 'object_center_px', 'place_px')):
-        P['relook'] += 1
     done_steps = _apply_episode_plan(parsed, dep, source='slow')
     Image.fromarray(both).save(os.path.join(ep_dir, f'slow{P["slow"]}.jpg'))
     CUR.update(slow=f"{mode}/{crit or '-'}:{issue}->{done_steps}"[:160], slow_t=T[0])
@@ -2113,7 +2108,10 @@ def _finish_slow(parsed, rec, dep, both, intent, result, mode, crit, snap_dec):
 
 def _prepare_slow_snapshot(ctx, crit, phase, both, image_tag):
     import coding_agent_slow as CAS
-    brief = JX.build_jev_experience_brief(LIB, facts={}, ns={}, uses=EP.get('uses') or {}, dsl=dsl)
+    ns, preds = namespace()
+    brief = JX.build_jev_experience_brief(
+        LIB, facts=facts(ns, preds), ns=ns, uses=EP.get('uses') or {}, dsl=dsl,
+        episode_lessons=FB_LESSONS, episode_start_plan=EP.get('start_plan'))
     # Unique image and detached policy context belong to this request.
     frame = os.path.join(ep_dir, f'slow_input_{image_tag}.jpg')
     Image.fromarray(both).save(frame)
@@ -2154,9 +2152,9 @@ def _account_slow_rec(rec):
     if not rec:
         return
     try:
-        P['astra_cost'] += float(rec.get('cost_usd') or 0.0)
-        P['astra_calls'] += 1
-        P['last_astra_wall'] = time.time()
+        P['planning_cost'] += float(rec.get('cost_usd') or 0.0)
+        P['planning_calls'] += 1
+        P['last_planning_wall'] = time.time()
     except Exception:
         pass
 
@@ -2175,7 +2173,8 @@ def _clear_slow_job():
     """Drop current ownership pointers. Does not revoke a worker's private result_box (already detached on abandon)."""
     SLOW_JOB.update(thread=None, snap_dec=None, dep=None, both=None, intent=None, result=None,
                     mode=None, crit=None, out=None, err=None, rec=None, parsed=None,
-                    job_id=None, result_box=None)
+                    job_id=None, result_box=None, target_rev=None, closed=None,
+                    n_close=None, goal_confirmed=None)
 
 def _abandon_async_slow(reason='abandon'):
     """Invalidate current async ownership so a late worker cannot apply. Orphan thread may still finish for cost."""
@@ -2193,7 +2192,9 @@ def _abandon_async_slow(reason='abandon'):
         def _orphan_join(t=th, result_box=box, info=meta):
             t.join()
             SLOW_ORPHAN_COSTS.put((result_box, info))
-        threading.Thread(target=_orphan_join, daemon=True).start()
+        waiter = threading.Thread(target=_orphan_join, daemon=True)
+        SLOW_ORPHAN_WAITERS.append(waiter)
+        waiter.start()
     elif box is not None:
         # Already finished: account cost, never apply
         _log_slow_result(box)
@@ -2203,6 +2204,23 @@ def _abandon_async_slow(reason='abandon'):
         except Exception:
             pass
     return True
+
+def _finalize_slow_jobs():
+    """Join bounded CLI calls and record their results without moving the robot."""
+    th = SLOW_JOB.get('thread')
+    if th is not None:
+        th.join()  # Codex calls enforce their own timeout.
+        box = SLOW_JOB.get('result_box') or {}
+        _log_slow_result(box)
+        _account_slow_rec(box.get('rec'))
+        log(t=T[0], async_final_discard=True, job_id=SLOW_JOB.get('job_id'),
+            error=str(box['err']) if box.get('err') else None)
+        _clear_slow_job()
+    for waiter in SLOW_ORPHAN_WAITERS:
+        waiter.join()
+    SLOW_ORPHAN_WAITERS.clear()
+    _drain_orphan_slow_costs()
+
 
 def _poll_async_slow(wait=False, timeout=None):
     """If the CURRENT owned async watch finished: apply if <= SLOW_STALE_INTENTS late, else discard.
@@ -2234,6 +2252,13 @@ def _poll_async_slow(wait=False, timeout=None):
     if err is not None:
         _clear_slow_job()
         return f'async_error:{err}', None
+    if (SLOW_JOB['target_rev'] != GOAL_TARGET['rev']
+            or SLOW_JOB['closed'] != bool(EP.get('closed'))
+            or SLOW_JOB['n_close'] != int(EP.get('n_close', 0))
+            or SLOW_JOB['goal_confirmed'] != goal_id_confirmed()):
+        _account_slow_rec(rec)
+        _clear_slow_job()
+        return 'async_state_changed_discard', {'snap_dec': snap_dec, 'apply_dec': dec, 'job_id': job_id}
     if stale > SLOW_STALE_INTENTS:
         _account_slow_rec(rec)
         _clear_slow_job()
@@ -2249,8 +2274,8 @@ def _launch_async_slow(intent, result, crit=None, replace=False):
         if not replace:
             return 'async_busy', None
         _abandon_async_slow(reason='replace_launch')
-    gap = time.time() - P['last_astra_wall']
-    if P['last_astra_wall'] > 0 and gap < SLOW_MIN_GAP_S:
+    gap = time.time() - P['last_planning_wall']
+    if P['last_planning_wall'] > 0 and gap < SLOW_MIN_GAP_S:
         return 'rate_limited', None
     if P['slow'] >= MAX_SLOW: return 'slow_cap', None
     both, rgb, dep = _combo_rgb()
@@ -2260,7 +2285,9 @@ def _launch_async_slow(intent, result, crit=None, replace=False):
     snapshot = _prepare_slow_snapshot(ctx, crit, 'slow_think_async', both, f'async_{job_id}')
     SLOW_JOB.update(snap_dec=dec, dep=dep.copy(), both=both.copy(), intent=intent, result=result,
                     mode='async', crit=crit, out=None, err=None, rec=None, parsed=None,
-                    job_id=job_id, result_box=result_box)
+                    job_id=job_id, result_box=result_box, target_rev=GOAL_TARGET['rev'],
+                    closed=bool(EP.get('closed')), n_close=int(EP.get('n_close', 0)),
+                    goal_confirmed=goal_id_confirmed())
     th = threading.Thread(target=_slow_worker, args=(job_id, result_box, snapshot), daemon=True)
     SLOW_JOB['thread'] = th; th.start()
     return 'async_launched', {'snap_dec': dec, 'intent': intent, 'crit': crit, 'job_id': job_id}
@@ -2574,7 +2601,8 @@ def fb_trigger():
     return None
 
 # ---- episode-start Great Wall global plan (before first approach) ----
-START_PLAN_OUT = {'mode': 'off'}
+dec = 0
+START_PLAN_OUT = {'mode': 'codex'}
 try:
     START_PLAN_OUT = _run_episode_start_plan()
 except Exception as _sp_ex:
@@ -2586,8 +2614,10 @@ except Exception as _sp_ex:
 
 t0 = time.time(); res = {'suite': suite, 'task_id': tid, 'init': init_i, 'language': LANG, 'library': LIBP, 'library_version': LIB.get('version'),
                          'fallback': FALLBACK, 'perception0': per0, 'start_plan': START_PLAN_OUT}
-end = 'horizon'; jev_calls = 0; dec = 0; fb_events = []; slow_events = []
+end = 'horizon'; jev_calls = 0; fb_events = []; slow_events = []
 try:
+    if START_PLAN_OUT.get('error'):
+        raise RuntimeError(f"episode_start_plan_failed:{START_PLAN_OUT['error']}")
     intents = {i['name']: i for i in LIB['intents']}
     while T[0] < HORIZON and not DONE[0] and dec < MAX_DEC:
         trig = fb_trigger()
@@ -2640,6 +2670,7 @@ try:
                         cur = _cmd_yaw_deg(); RSHAPE['yaw'] = float(np.clip(cur + e('yaw_delta_deg'), -90, 90))
                         PATCH['yaw_deg'] = RSHAPE['yaw']
                     recovery_mutated = True
+                    _note_patch_mutation(f"recovery:{rc['id']}", sh)
                     log(dec=dec, t=T[0], shape_rule=rc['id'], rshape=dict(RSHAPE), patch_yaw=PATCH.get('yaw_deg'))
                 if 'force_intent' in rc and rc['force_intent'] in intents:
                     forced = rc['force_intent']; break
@@ -2726,14 +2757,6 @@ try:
                             slow_events.append({'dec': dec, 'intent': it, 'intent_result': r, 'result': sr, 'detail': so})
                             log(dec=dec, t=T[0], slow_think=sr, intent=it, intent_result=r, detail=so)
         if r == 'finish': break
-    # flush in-flight async slow-watch before settle / result write
-    try:
-        sr, so = _poll_async_slow(wait=True, timeout=120)
-        if sr is not None:
-            slow_events.append({'dec': dec, 'flush': True, 'result': sr, 'detail': so})
-            log(dec=dec, t=T[0], slow_think=sr, flush=True, detail=so)
-    except Exception:
-        pass
     # LIBERO official eval does not stop on a policy 'finish': keep no-op stepping (gripper holds last command) until done or HORIZON
     stop = 'finish' if EP['prev'] == 'finish' else ('decision_cap' if dec >= MAX_DEC else None); t_stop = T[0]
     while not DONE[0] and T[0] < HORIZON:
@@ -2743,6 +2766,7 @@ try:
     res['stopped_at_step'] = t_stop if stop else None
 except Exception:
     import traceback; end = 'harness_error'; res['error'] = traceback.format_exc()[-1200:]
+_finalize_slow_jobs()
 # diagnostic: which sim body moved most (never shown to policy)
 moved_most = None
 try:
@@ -2756,7 +2780,8 @@ try:
 except Exception as _e:
     moved_most = [{'error': str(_e)[:120]}]
 res.update(success=bool(DONE[0]), end_reason=end, env_steps=T[0], decisions=dec, jev_calls=jev_calls, astra_calls=P['astra_calls'],
-           astra_cost_usd=round(P['astra_cost'], 4), relooks=P['relook'], fallback_events=fb_events, slow_think_events=slow_events,
+           astra_cost_usd=round(P['astra_cost'], 4), planning_calls=P['planning_calls'],
+           planning_cost_usd=round(P['planning_cost'], 4), relooks=P['relook'], fallback_events=fb_events, slow_think_events=slow_events,
            slow_interventions=P['slow'], gate_jev_calls=EP.get('gate_jev_calls', 0), final_patch=PATCH, fallback_lessons=FB_LESSONS, learned_shape=RSHAPE,
            start_identity=START_ID, identity_events=ID_EVENTS, goal_id=GOAL_ID, goal_target=GOAL_TARGET,
            close_refusals=GOAL_ID.get('close_refusals', 0), moved_most=moved_most, wall_s=round(time.time() - t0, 1),

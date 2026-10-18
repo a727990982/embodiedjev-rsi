@@ -17,7 +17,7 @@ Public snapshot of the LIBERO RSI / EmbodiedJev harness. This repo had no prior 
 
 The harness always uses Codex for episode-start planning.
 
-Before the first approach the planner reads `experience_brief` and writes one ordered skeleton (`start_plan.json`). `phase_order` is a full cycle per language-goal object: approach → grasp → lift → place → **retreat**, then the next object, ending with a retreat. Retreat after every place is filled in if the model omits it. Mid-episode slow-think only fine-tunes that skeleton.
+Before the first approach the planner reads `experience_brief` and writes one ordered skeleton (`start_plan.json`). `phase_order` is a full cycle per language-goal object: approach → grasp → lift → place → **retreat**, then the next object, ending with a retreat. Retreat after every place is filled in if the model omits it. This skeleton is guidance passed to Jev and subsequent slow-think calls, not a deterministic stage executor; Jev still chooses intents subject to harness rules.
 
 Planning calls the Codex CLI. Tests use fixed model-shaped replies to exercise validators and identity gates without making model calls.
 
@@ -53,7 +53,7 @@ Early recovery refreshes perception with Astra through Codex CLI, then requests 
 
 Codex looks up `codex` on `PATH`, or `CODING_AGENT_CODEX_BIN`. Planning uses `CODING_AGENT_CODEX_MODEL` and `CODING_AGENT_CODEX_EFFORT`; vision uses `gpt-6-astra` with `ASTRA_EFFORT` (default `xhigh`). A proxy is used only when `CODING_AGENT_HTTP_PROXY` or `CODING_AGENT_SOCKS` is set. Do not commit proxy URLs, keys, or host details.
 
-Async slow-think captures a detached copy of policy state and a unique image before starting its worker. Workers return results and log events in private job boxes; the main thread writes the decision log. Simulator diagnostic files are never passed to the coding monitor, including when `DIAG` is enabled.
+Async slow-think captures a detached copy of policy state and a unique image before starting its worker. Workers return results and log events in private job boxes; the main thread writes the decision log. Simulator diagnostic files are never passed to the coding monitor, including when `DIAG` is enabled. Async advice is discarded after target revision, gripper state, close-attempt count, or identity confirmation changes. At shutdown pending calls are joined and logged without applying their plans.
 
 ## Running an episode
 
@@ -65,7 +65,7 @@ Once the external dependencies are installed:
 PYTHONPATH=/path/to/bench/common python libero_rsi/run_ep_fbpatch.py SUITE TID INIT LIB.json OUTDIR
 ```
 
-Libraries are validated before environment creation. Recovery-rule errors are logged and end the episode with `harness_error`, rather than silently continuing with potentially partial state changes.
+A failed start plan stops the episode before Jev decisions and is recorded as `harness_error`. Libraries are validated before environment creation. Recovery-rule errors are logged and end the episode with `harness_error`, rather than silently continuing with potentially partial state changes.
 
 ## Smoke tests
 
@@ -84,3 +84,9 @@ Each test adds `libero_rsi/` to `sys.path`, so `validate` and `dsl_libero` resol
 The regression suite executes selected production functions with environment/model doubles, covering identity authorization, fixed backend routing and Codex failure handling, event timestamps, async snapshots, diagnostic isolation, recovery failures, and validation of every shipped library. These tests do not establish simulation success.
 
 `libs/smoke_copies/` contains duplicate library fixtures retained from the original snapshot; these are not independent policy variants or experimental results.
+
+## Call-chain audit
+
+See [the call-chain audit](libero_rsi/reviews/call_chain_audit.md) for verified wiring, fixed regressions, and remaining environment requirements. `test_runtime_chain.py` executes the top-level runner with fake services; it does not test LIBERO physics or robot success.
+
+`astra_calls` now counts visual perception/identity replies only; `planning_calls` counts start/slow-planning replies. Codex CLI does not provide measured usage in this adapter, so its zero-valued cost fields are placeholders, not evidence of free calls.
