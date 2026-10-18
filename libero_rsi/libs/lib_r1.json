@@ -1,0 +1,174 @@
+{
+ "version": "libero_rsi_r1_a0",
+ "note": "Generic cold-start pick-and-place menu over honest LIBERO signals (proprioception, finger contact flags, Astra keypoints). No task-specific constants; no grasp verification, placement correction or retry rules yet (left to RSI).",
+ "intent_instructions": "Choose from current facts rather than following the menu blindly. When release_ready is true, select open_gripper immediately. After open_gripper select retreat. After retreat, if the episode continues and camera budget remains, select relook before considering finish; use refreshed estimates to retry a misplaced object. Opening during reopen_and_retry is a grasp retry, not completed placement. For acquisition, prioritize close_gripper when at_grasp is true and the gripper is open. After descend_to_grasp, continue descending if still aligned and not at_grasp; losing above_grasp during descent is expected and does not require moving upward. Repeated unsuccessful descents warrant relook within the camera budget. After closing, both finger contacts justify a trial lift even when seen_held is false from an earlier look. After lifting, check current finger contacts before carrying. A nearly shut gripper with neither finger contacting indicates an empty grasp; select reopen_and_retry and refresh perception before another descent when camera budget remains. A narrow opening with both contacts can still be a valid grasp. Use relook for ambiguous contact evidence, not merely for an old seen_held value. Once above_place with both contacts, lower until release_ready and then open; do not restart lift merely because lifted becomes false during lowering. Never infer task success solely from release or retreat. Respect the camera budget and bound grasp retries; finish is an exhausted-attempt stop when further recovery is unavailable.",
+ "intents": [
+  {
+   "id": "move_above_object@v0",
+   "name": "move_above_object",
+   "action": "move",
+   "fingers": "open",
+   "definition": "Gripper open and not above_grasp: move above the estimated grasp point.",
+   "refpoint": "vec(grasp[0], grasp[1], grasp[2] + 2*obj_h)",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior"
+  },
+  {
+   "id": "descend_to_grasp@v0",
+   "name": "descend_to_grasp",
+   "action": "move",
+   "fingers": "open",
+   "definition": "above_grasp is true and at_grasp is false, gripper open: descend to the grasp point.",
+   "refpoint": "grasp",
+   "gain": "0.5",
+   "status": "hypothesis",
+   "evidence": "cold-start prior"
+  },
+  {
+   "id": "close_gripper@v0",
+   "name": "close_gripper",
+   "action": "move",
+   "fingers": "close",
+   "definition": "at_grasp is true and the gripper is open: close the fingers.",
+   "refpoint": "tcp",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior"
+  },
+  {
+   "id": "lift@v0",
+   "name": "lift",
+   "action": "move",
+   "fingers": "close",
+   "definition": "Gripper closed on the object and not lifted: raise vertically.",
+   "refpoint": "vec(tcp[0], tcp[1], max(grasp[2], place[2]) + 3*obj_h)",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior"
+  },
+  {
+   "id": "carry_to_place@v0",
+   "name": "carry_to_place",
+   "action": "move",
+   "fingers": "close",
+   "definition": "lifted is true and above_place is false: carry the held object above the place point.",
+   "refpoint": "vec(place[0] + grasp[0] - objc[0], place[1] + grasp[1] - objc[1], tcp[2])",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior"
+  },
+  {
+   "id": "lower_to_place@v0",
+   "name": "lower_to_place",
+   "action": "move",
+   "fingers": "keep",
+   "definition": "Gripper closed with both finger contacts and above_place true, but release_ready false: lower vertically while preserving the grasp; becoming lower than the transport height does not require lifting again.",
+   "refpoint": "vec(tcp[0], tcp[1], place[2] + min(max(clear, 0), 0.2*obj_h) + tcp_at_close[2] - objc[2] + obj_h)",
+   "gain": "0.5",
+   "status": "hypothesis",
+   "evidence": "Repeated lowering was followed by camera-driven target changes and renewed transport; several releases also occurred substantially above the estimated support."
+  },
+  {
+   "id": "open_gripper@v0",
+   "name": "open_gripper",
+   "action": "move",
+   "fingers": "open",
+   "definition": "The object has been lowered over the place point: open the fingers to release.",
+   "refpoint": "tcp",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior"
+  },
+  {
+   "id": "retreat@v0",
+   "name": "retreat",
+   "action": "move",
+   "fingers": "open",
+   "definition": "released_since_close is true: raise the empty gripper.",
+   "refpoint": "vec(tcp[0], tcp[1], max(tcp[2], place[2] + 3*obj_h))",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior"
+  },
+  {
+   "id": "reopen_and_retry@v0",
+   "name": "reopen_and_retry",
+   "action": "move",
+   "fingers": "open",
+   "definition": "The grasp failed (gripper closed but the object is not held): open and go back above the grasp point.",
+   "refpoint": "vec(grasp[0], grasp[1], grasp[2] + 2*obj_h)",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior"
+  },
+  {
+   "id": "relook@v0",
+   "name": "relook",
+   "action": "relook",
+   "fingers": "keep",
+   "definition": "Ask the camera perception module to look again and refresh object/place estimates and whether the object is held.",
+   "refpoint": "tcp",
+   "status": "hypothesis",
+   "evidence": "cold-start prior"
+  },
+  {
+   "id": "finish@v0",
+   "name": "finish",
+   "action": "finish",
+   "fingers": "keep",
+   "definition": "The object was released at the place and the gripper retreated: stop.",
+   "refpoint": "tcp",
+   "status": "hypothesis",
+   "evidence": "cold-start prior"
+  }
+ ],
+ "predicates": [
+  {
+   "id": "above_grasp@v0",
+   "name": "above_grasp",
+   "expr": "dist_xy(tcp, grasp) < 0.3*obj_h and tcp[2] > grasp[2] + obj_h",
+   "meaning": "gripper is roughly above the grasp point",
+   "status": "hypothesis"
+  },
+  {
+   "id": "at_grasp@v0",
+   "name": "at_grasp",
+   "expr": "dist_xy(tcp, grasp) < max(0.2*obj_h, 0.1*open_max) and abs(tcp[2] - grasp[2]) < max(0.25*obj_h, 0.2*open_max)",
+   "meaning": "gripper is aligned with the grasp and close enough vertically to attempt closing",
+   "status": "hypothesis"
+  },
+  {
+   "id": "lifted@v0",
+   "name": "lifted",
+   "expr": "closed_cmd and tcp[2] > max(grasp[2], place[2]) + 2*obj_h",
+   "meaning": "closed gripper is raised well above grasp and place heights",
+   "status": "hypothesis"
+  },
+  {
+   "id": "above_place@v0",
+   "name": "above_place",
+   "expr": "dist_xy(vec(tcp[0] - grasp[0] + objc[0], tcp[1] - grasp[1] + objc[1], 0), place) < 0.3*obj_h",
+   "meaning": "held object is roughly above the place point",
+   "status": "hypothesis"
+  },
+  {
+   "id": "release_ready@v1",
+   "name": "release_ready",
+   "expr": "closed_cmd and above_place and abs(tcp[2] - (place[2] + min(max(clear, 0), 0.2*obj_h) + tcp_at_close[2] - objc[2] + obj_h)) < max(0.1*obj_h, 0.05*open_max)",
+   "meaning": "closed gripper is aligned over the target and has reached the commanded release height; select open_gripper",
+   "status": "hypothesis"
+  }
+ ],
+ "recoveries": [],
+ "lessons": [
+  {
+   "id": "rsi_r1_evidence",
+   "name": "round-1 acceptance",
+   "signature": "train eval",
+   "instead": "",
+   "evidence": "seed 1/15 -> 3/15 on train",
+   "status": "verified"
+  }
+ ]
+}

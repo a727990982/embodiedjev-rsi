@@ -1,0 +1,472 @@
+{
+ "version": "ee_pg_v14+place_release",
+ "note": "Generic cold-start pick-and-place menu over honest LIBERO signals (proprioception, finger contact flags, Astra keypoints). No task-specific constants. + multi-action stall feedback (raise/redescend, lateral recenter, relative yaw, confirm contact, clear/reapproach, push_aside) via stall_feedback recoveries; neighbour-block prefers clear then open-finger push_aside along gripper open axis / away from grasp; descent_servo_stalled fires on servo stall/timeout after descend without dist(tcp,grasp) gate; descent_stalled keeps near-grasp contactless variant. + hybrid ask_astra/consult_astra (Jev-chosen Astra help; hard stall/identity force; shared MAX_SLOW). + episode-start Great Wall plan prior (predict neighbour block \u2192 push_aside/clear before first approach). + place-phase: consecutive lower_to_place stall / lift\u2194lower thrash over place \u2192 force open_gripper (place_force_release).",
+ "intent_instructions": "Select the next intent whose definition and preconditions match observed_facts and the predicates. Typical order: move_above_object, descend_to_grasp, close_gripper, lift, carry_to_place, lower_to_place, open_gripper, retreat, finish. If descent_servo_stalled, descent_stalled, descent_hit, or empty_close is true, prefer move_above_object / reopen_and_retry after recovery feedback \u2014 do not keep selecting close_gripper without bilateral contact. When a neighbour blocks the grasp angle, recovery may clear then push_aside the blocker (geometry-based; no fixed yaw) before re-approaching. For tall bottles/containers after a tip or near miss: keep clearance above the body, center, then descend vertically (tip/push aside neighbours if too close \u2014 no fixed scene angles). When stuck, identity unsure, or descent stalled/empty close, you may select ask_astra (or consult_astra) to request Astra help \u2014 not every step; it shares the slow-think budget. If lower_to_place repeatedly stalls/timeouts while above_place, prefer open_gripper (release) over more lift\u2194lower thrash.",
+ "intents": [
+  {
+   "id": "move_above_object@v0",
+   "name": "move_above_object",
+   "action": "move",
+   "fingers": "open",
+   "definition": "Gripper open and not above_grasp: move above the estimated grasp point.",
+   "refpoint": "vec(grasp[0], grasp[1], grasp[2] + 2*obj_h)",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "descend_to_grasp@v0",
+   "name": "descend_to_grasp",
+   "action": "move",
+   "fingers": "open",
+   "definition": "above_grasp is true and at_grasp is false, gripper open: descend to the grasp point.",
+   "refpoint": "grasp",
+   "gain": "0.5",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "close_gripper@v0",
+   "name": "close_gripper",
+   "action": "move",
+   "fingers": "close",
+   "definition": "at_grasp is true and the gripper is open: close the fingers.",
+   "refpoint": "tcp",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "lift@v0",
+   "name": "lift",
+   "action": "move",
+   "fingers": "close",
+   "definition": "Gripper closed on the object and not lifted: raise vertically.",
+   "refpoint": "vec(tcp[0], tcp[1], max(grasp[2], place[2]) + 3*obj_h)",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "carry_to_place@v0",
+   "name": "carry_to_place",
+   "action": "move",
+   "fingers": "close",
+   "definition": "lifted is true and above_place is false: carry the held object above the place point.",
+   "refpoint": "vec(place[0] + grasp[0] - objc[0], place[1] + grasp[1] - objc[1], tcp[2])",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "lower_to_place@v0",
+   "name": "lower_to_place",
+   "action": "move",
+   "fingers": "close",
+   "definition": "above_place is true and the gripper is still closed: lower the object to the release height.",
+   "refpoint": "vec(tcp[0], tcp[1], place[2] + clear + tcp_at_close[2] - objc[2] + obj_h)",
+   "gain": "0.5",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "open_gripper@v0",
+   "name": "open_gripper",
+   "action": "move",
+   "fingers": "open",
+   "definition": "The object has been lowered over the place point: open the fingers to release.",
+   "refpoint": "tcp",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "retreat@v0",
+   "name": "retreat",
+   "action": "move",
+   "fingers": "open",
+   "definition": "released_since_close is true: raise the empty gripper.",
+   "refpoint": "vec(tcp[0], tcp[1], max(tcp[2], place[2] + 3*obj_h))",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "reopen_and_retry@v0",
+   "name": "reopen_and_retry",
+   "action": "move",
+   "fingers": "open",
+   "definition": "The grasp failed (gripper closed but the object is not held): open and go back above the grasp point.",
+   "refpoint": "vec(grasp[0], grasp[1], grasp[2] + 2*obj_h)",
+   "gain": "1",
+   "status": "hypothesis",
+   "evidence": "cold-start prior",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "relook@v0",
+   "name": "relook",
+   "action": "relook",
+   "fingers": "keep",
+   "definition": "Ask the camera perception module to look again and refresh object/place estimates and whether the object is held.",
+   "refpoint": "tcp",
+   "status": "hypothesis",
+   "evidence": "cold-start prior"
+  },
+  {
+   "id": "ask_astra@v0",
+   "name": "ask_astra",
+   "action": "ask_astra",
+   "fingers": "keep",
+   "definition": "Request Astra slow-think help when stuck, identity unsure, approach looks wrong, or experience_brief suggests consulting vision. Not every step \u2014 budget-limited; prefer after stall/timeout/empty close/identity doubt over blind close_gripper.",
+   "refpoint": "tcp",
+   "status": "hypothesis",
+   "evidence": "hybrid Astra help",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "consult_astra@v0",
+   "name": "consult_astra",
+   "action": "consult_astra",
+   "fingers": "keep",
+   "definition": "Alias of ask_astra: consult Astra for an episode-only diagnosis and recovery plan (shares the slow-think budget).",
+   "refpoint": "tcp",
+   "status": "hypothesis",
+   "evidence": "hybrid Astra help",
+   "tilt_deg": "0",
+   "tilt_dir_deg": "0"
+  },
+  {
+   "id": "finish@v0",
+   "name": "finish",
+   "action": "finish",
+   "fingers": "keep",
+   "definition": "The object was released at the place and the gripper retreated: stop.",
+   "refpoint": "tcp",
+   "status": "hypothesis",
+   "evidence": "cold-start prior"
+  }
+ ],
+ "predicates": [
+  {
+   "id": "above_grasp@v0",
+   "name": "above_grasp",
+   "expr": "dist_xy(tcp, grasp) < 0.3*obj_h and tcp[2] > grasp[2] + obj_h",
+   "meaning": "gripper is roughly above the grasp point",
+   "status": "hypothesis"
+  },
+  {
+   "id": "at_grasp@v0",
+   "name": "at_grasp",
+   "expr": "dist(tcp, grasp) < 0.25*obj_h",
+   "meaning": "gripper is at the grasp point",
+   "status": "hypothesis"
+  },
+  {
+   "id": "lifted@v0",
+   "name": "lifted",
+   "expr": "closed_cmd and tcp[2] > max(grasp[2], place[2]) + 2*obj_h",
+   "meaning": "closed gripper is raised well above grasp and place heights",
+   "status": "hypothesis"
+  },
+  {
+   "id": "above_place@v0",
+   "name": "above_place",
+   "expr": "dist_xy(vec(tcp[0] - grasp[0] + objc[0], tcp[1] - grasp[1] + objc[1], 0), place) < 0.3*obj_h",
+   "meaning": "held object is roughly above the place point",
+   "status": "hypothesis"
+  },
+  {
+   "id": "at_grasp_relaxed@v1",
+   "name": "at_grasp_relaxed",
+   "expr": "contact or (prev == 'descend_to_grasp' and n_same >= 2 and dist(tcp, grasp) < 0.6*obj_h and (left_contact or right_contact) and (n_close == 0 or opening_at_close >= 0.15*open_max))",
+   "meaning": "Both fingers touch, or descent repeated near grasp with at least one finger contact (not a contactless stall).",
+   "status": "hypothesis",
+   "source": "human_prior",
+   "evidence": [
+    "object_t1_i1",
+    "stall_feedback_v13"
+   ]
+  },
+  {
+   "id": "empty_close@hp",
+   "name": "empty_close",
+   "expr": "closed_cmd and n_close >= 1 and opening_at_close < 0.15*open_max and not contact",
+   "meaning": "the fingers closed on nothing",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "descent_hit@hp",
+   "name": "descent_hit",
+   "expr": "prev == 'descend_to_grasp' and not closed_cmd and (left_contact or right_contact) and not contact",
+   "meaning": "one finger hit something while descending with open fingers",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "descent_servo_stalled@v1",
+   "name": "descent_servo_stalled",
+   "expr": "prev == 'descend_to_grasp' and not closed_cmd and not contact and (last_result == 'stalled' or last_result == 'timeout')",
+   "meaning": "open-finger descend reported servo stalled or timeout \u2014 fires even when grasp estimate is far (no dist gate)",
+   "status": "hypothesis",
+   "source": "human_prior",
+   "evidence": "P0: dist(tcp,grasp) gate hid real stalls when Astra grasp was off / neighbour block"
+  },
+  {
+   "id": "descent_stalled@v2",
+   "name": "descent_stalled",
+   "expr": "prev == 'descend_to_grasp' and not closed_cmd and not contact and dist(tcp, grasp) < 1.5*obj_h and (n_same >= 2 or last_result == 'stalled' or last_result == 'timeout')",
+   "meaning": "open-finger descent stalled or repeated near the grasp estimate without bilateral contact",
+   "status": "hypothesis",
+   "source": "human_prior",
+   "evidence": "near-grasp contactless variant; sibling of descent_servo_stalled (no dist gate)"
+  }
+ ],
+ "recoveries": [
+  {
+   "id": "hp_place_lower_stall_release",
+   "trigger": "closed_cmd and above_place and place_lower_stall_n >= 3 and (prev == 'lower_to_place' or place_lift_lower_cycles >= 2)",
+   "force_intent": "open_gripper",
+   "max_uses": 2,
+   "status": "hypothesis",
+   "source": "human_prior",
+   "evidence": "carry reached + lower_to_place thrash (stall/timeout) over place XY \u2192 force release instead of endless lift\u2194lower (harness also hard-gates via MAX_PLACE_LOWER_STALL)"
+  },
+  {
+   "id": "hp_neighbour_block_push_aside",
+   "trigger": "(descent_hit or descent_servo_stalled or descent_stalled) and clear_reapproach_n >= 1 and not closed_cmd and not contact",
+   "force_intent": "move_above_object",
+   "stall_feedback": "push_aside",
+   "max_uses": 2,
+   "status": "hypothesis",
+   "source": "human_prior",
+   "evidence": "unilateral/neighbour block after clear_reapproach without progress \u2192 open-finger push_aside then re-approach (geometry; no object names / fixed yaw)"
+  },
+  {
+   "id": "hp_descent_hit_clear",
+   "trigger": "descent_hit",
+   "force_intent": "move_above_object",
+   "stall_feedback": true,
+   "max_uses": 2,
+   "status": "hypothesis",
+   "source": "human_prior",
+   "evidence": "unilateral contact on descent \u2192 clear/reapproach menu (not relook-only)"
+  },
+  {
+   "id": "hp_empty_close_feedback",
+   "trigger": "empty_close",
+   "force_intent": "move_above_object",
+   "stall_feedback": true,
+   "max_uses": 3,
+   "status": "hypothesis",
+   "source": "human_prior",
+   "evidence": "empty close \u2192 raise/recenter feedback rather than relook-only"
+  },
+  {
+   "id": "hp_descent_stalled_feedback",
+   "trigger": "descent_servo_stalled or descent_stalled",
+   "force_intent": "move_above_object",
+   "stall_feedback": true,
+   "max_uses": 3,
+   "status": "hypothesis",
+   "source": "human_prior",
+   "evidence": "servo stall after descend OR near-grasp contactless stall \u2192 multi-action stall feedback"
+  },
+  {
+   "id": "hp_relaxed_at_grasp_close",
+   "trigger": "at_grasp_relaxed and contact and not closed_cmd and not at_grasp and prev == 'descend_to_grasp'",
+   "force_intent": "close_gripper",
+   "max_uses": 3,
+   "status": "hypothesis",
+   "source": "human_prior",
+   "evidence": "only close when bilateral contact present \u2014 contactless stall uses stall_feedback"
+  },
+  {
+   "id": "repeated_contactless_descent_feedback",
+   "trigger": "prev == 'descend_to_grasp' and n_same >= 2 and not closed_cmd and not left_contact and not right_contact and not at_grasp and not descent_stalled and not descent_servo_stalled",
+   "force_intent": "move_above_object",
+   "stall_feedback": true,
+   "max_uses": 2,
+   "status": "hypothesis",
+   "evidence": [
+    "object_t1_i0",
+    "object_t1_i1",
+    "stall_feedback_v13",
+    "excludes both descent_stalled and descent_servo_stalled to avoid dead zones / double-fire"
+   ]
+  }
+ ],
+ "lessons": [
+  {
+   "id": "hp_a",
+   "name": "contact during descent",
+   "signature": "a finger touches something before the close while descending",
+   "instead": "stop descending and look again; the object was probably pushed or is blocked",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_b",
+   "name": "empty close",
+   "signature": "fingers close almost fully without contact",
+   "instead": "the object probably moved; look again before regrasping",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_c",
+   "name": "blocked target",
+   "signature": "the target object is occluded or hemmed in by neighbours",
+   "instead": "clear the path by pushing the blocker aside, or change the approach direction",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_d",
+   "name": "high release",
+   "signature": "the object is released far above the place surface",
+   "instead": "lower the object close to the place surface before opening",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_e",
+   "name": "stalled descent is not grasp confirmation",
+   "signature": "Descent stalls near the estimated grasp point without finger contact, and subsequent closes leave the fingers nearly shut while the object stays on its support.",
+   "instead": "Treat the close as empty and reassess alignment and reachable grasp geometry; proximity or a reached descent target does not establish capture, and repeated approach cycles after a missed close do not demonstrate progress.",
+   "evidence": [
+    "object_t1_i1",
+    "object_t5_i2"
+   ],
+   "status": "verified",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_wrong_object",
+   "name": "wrong object grasped",
+   "signature": "the language names a specific object, a similar neighbour is nearby, and after contact or lift the goal object is still on the table while something else is held",
+   "instead": "discard the current grasp estimate and look again for the language-goal object before regrasping",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_near_approach_tips",
+   "name": "near approach tips tall object",
+   "signature": "approaching or descending too close to a tall bottle or can tips or pushes it before the grasp closes",
+   "instead": "keep a clear height above the body, center over it, then descend vertically",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_start_identity",
+   "name": "preserve identity across approach updates",
+   "signature": "Earlier informative views distinguish the target or expose a candidate mismatch, but later approach views obscure identity and refreshed estimates continue directing the gripper toward a neighbouring item.",
+   "instead": "Reconcile the candidate with earlier visual evidence before accepting refreshed grasp estimates. Later occlusion does not erase an earlier visible identity mismatch, and approaching a wrong candidate does not establish that it was grasped or carried. Preserving identity across updates remains a proposed recovery rather than a demonstrated successful intervention.",
+   "evidence": [
+    "object_t6_i0",
+    "object_t6_i1",
+    "object_t6_i2"
+   ],
+   "status": "verified",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_place_target_check",
+   "name": "place target may be wrong",
+   "signature": "after a successful lift the place region may still refer to the wrong container or surface for the language goal",
+   "instead": "verify the place region against the language goal before carrying and releasing",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_contact_not_held",
+   "name": "contact without held",
+   "signature": "Both fingers report contact after closing while the last camera estimate says the object is not held.",
+   "instead": "Treat the camera estimate as potentially stale rather than reopening solely on that estimate; sustained bilateral contact and an opening consistent with the object support attempting a lift, while ambiguous current evidence warrants refreshed perception.",
+   "evidence": [
+    "object_t1_i0",
+    "object_t5_i0"
+   ],
+   "status": "verified",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_push_not_goal",
+   "name": "do not push the goal",
+   "signature": "a push-aside clears a blocker near the target",
+   "instead": "push only the blocker; never push the language-goal object",
+   "evidence": "human prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  },
+  {
+   "id": "hp_wait_official_success",
+   "name": "wait for official success",
+   "signature": "The object has been released over the target and official success has not yet been reported.",
+   "instead": "Allow release and retreat to complete without immediately regrasping; distinguish an issued finish from confirmed success and judge the outcome using the official check.",
+   "evidence": [
+    "object_t1_i0"
+   ],
+   "status": "scene-specific",
+   "source": "human_prior"
+  },
+  {
+   "id": "contactless_descent_alignment",
+   "name": "refresh approach after contactless descent stalls",
+   "signature": "Open finger descent stalls without finger contact while the object remains on its support, sometimes followed by repeated approach and descent cycles.",
+   "instead": "Refresh alignment within the perception budget and reassess approach clearance; refreshes and a shallower grasp can still end in an empty close and continued oscillation, so neither establishes a reliable recovery or justifies a universal pose override.",
+   "evidence": [
+    "object_t5_i0",
+    "object_t5_i2"
+   ],
+   "status": "scene-specific"
+  },
+  {
+   "id": "refused_close_is_not_empty_close",
+   "name": "distinguish refused closure from empty capture",
+   "signature": "Repeated close selections are refused by identity checks while the fingers remain open without contact; the arm stays near the candidate or repeats approach and descent without lifting or carrying.",
+   "instead": "Classify the refused actions as blocked execution. Repeated approach cycles and close selections after the perception budget is exhausted do not resolve identity refusal. Check earlier informative views before accepting an occluded candidate; obtaining a clearer view remains an untested recovery. These observations do not establish empty capture or justify changing grasp depth or orientation.",
+   "evidence": [
+    "object_t6_i0",
+    "object_t6_i1",
+    "object_t6_i2"
+   ],
+   "status": "verified"
+  },
+  {
+   "id": "hp_start_predict_neighbour",
+   "name": "predict neighbour block before approach",
+   "signature": "at episode start a neighbouring object sits close to the language-goal grasp so the open gripper path may collide before a bilateral close",
+   "instead": "plan a push_aside or clear_reapproach of the blocker before the first approach and grasp; do not wait until stall contact during descent",
+   "evidence": "rsi start-plan prior",
+   "status": "hypothesis",
+   "source": "human_prior"
+  }
+ ]
+}
