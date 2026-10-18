@@ -36,11 +36,11 @@ class RegressionTests(unittest.TestCase):
                 ep = {}
                 applied = []
                 scope = functions('_run_episode_start_plan', 'set_goal_id', 'goal_id_confirmed', 'identity_fields',
-                    EPISODE_START_PLAN='mock', JX=JX, LIB={'intents': [], 'lessons': []}, dsl=None,
+                    EPISODE_START_PLAN='codex', JX=JX, LIB={'intents': [], 'lessons': []}, dsl=None,
                     EP=ep, GOAL_ID=gid, T=[37], START_ID={'final': {}, 'verify': {}}, per0={},
                     LANG='put object in basket', ep_dir=temp, log=lambda **kw: None,
                     _apply_episode_plan=lambda *a, **kw: applied.append(a), DEP0=None)
-                with patch.object(CAS, 'harness_call_start_plan', return_value=(plan, {'backend': 'mock_start'})):
+                with patch.object(CAS, 'harness_call_start_plan', return_value=(plan, {'backend': 'codex_start'})):
                     result = scope['_run_episode_start_plan']()
                 self.assertIsNone(result['error'])
                 self.assertFalse(gid['confirmed'])
@@ -56,37 +56,12 @@ class RegressionTests(unittest.TestCase):
         scope['set_goal_id'](True, 'relook')
         self.assertEqual(scope['GOAL_ID']['events'][0]['t'], 29)
 
-    def test_library_lessons_are_not_scene_evidence(self):
-        for name in ('ee_pg_easy_v2_lib.json', 'ee_pg_lib.json'):
-            lib = json.loads((ROOT / 'libs' / name).read_text())
-            brief = JX.build_jev_experience_brief(lib)
-            for confirmed in (True, False, None):
-                with self.subTest(library=name, confirmed=confirmed):
-                    ctx = CAS.pack_start_context(lang='put object in basket', experience_brief=brief,
-                        start_hints={'goal_id_confirmed': confirmed,
-                                     'neighbour_prior': 'If a neighbour blocks the target, push_aside.'})
-                    result, _ = CAS.call_start_plan(ctx, mode='mock')
-                    self.assertEqual(result['step1_must'], 'approach' if confirmed is True else 'relook')
-                    self.assertIs(result['matched_language_goal'], True if confirmed is True else None)
-        ctx['start_hints'].update(goal_id_confirmed=True, identity_matched=False, neighbour_observed=True)
-        result, _ = CAS.call_start_plan(ctx, mode='mock')
-        self.assertEqual(result['step1_must'], 'relook')
-        self.assertIs(result['matched_language_goal'], False)
-
-    def test_monitor_ignores_instructions_and_false_flags(self):
-        ctx = CAS.pack_context(lang='put object in basket', trigger='async_watch', recent_diag=[],
-            experience_brief={'lessons': ['blocked_by_neighbour -> push_aside']}, patch={},
-            goal_id={'confirmed': True}, slow_ctx={
-                'intent_result': 'approached', 'predicates': {'descent_servo_stalled': False},
-                'local_deadend_global_relook': False, 'grasp_confirm': False,
-                'hint': 'if local_deadend_global_relook then do not push_aside; if neighbour then push_aside'})
-        result, _ = CAS.call_monitor(ctx, mode='mock')
-        self.assertFalse(result['intervene'])
-        ctx['patch_goal']['goal_id']['confirmed'] = False
-        ctx['slow_ctx']['neighbour_observed'] = True
-        result, _ = CAS.call_monitor(ctx, mode='mock')
-        self.assertEqual(result['plan'], [{'step': 'relook'}])
-        self.assertIsNone(result['matched_language_goal'])
+    def test_unsupported_backend_values_raise(self):
+        for resolver in (CAS.backend_mode, CAS.perceive_backend_mode, CAS.start_plan_backend_mode):
+            for value in ('mock', '1', 'on'):
+                with self.subTest(resolver=resolver.__name__, value=value):
+                    with self.assertRaises(ValueError):
+                        resolver(value)
 
     def test_dual_calls_codex(self):
         with patch.object(CAS, 'call_codex', return_value=(
@@ -104,7 +79,7 @@ class RegressionTests(unittest.TestCase):
             target = {'base': {'pixel': [2]}}
             events = []
             scope = functions('_prepare_slow_snapshot', '_slow_worker', '_log_slow_result',
-                CODING_AGENT_SLOW='mock', T=[5], ASTRA_EFFORT='xhigh',
+                CODING_AGENT_SLOW='codex', T=[5], ASTRA_EFFORT='xhigh',
                 JX=SimpleNamespace(build_jev_experience_brief=lambda *a, **kw: {'lessons': ['prior']}),
                 LIB={}, dsl=None, EP={'uses': {}}, LANG='goal', PATCH=patch_state, GOAL_TARGET=target,
                 goal_id_confirmed=lambda: True, ep_dir=temp,

@@ -2,7 +2,6 @@
 from pathlib import Path
 
 HARNESS = Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py'
-CAS = Path(__file__).resolve().parents[1] / 'coding_agent_slow.py'
 
 def main():
     src = HARNESS.read_text()
@@ -16,8 +15,6 @@ def main():
     assert '_confirm_grasp_after_close()' in src
     # open clears confirm
     assert "EP['grasp_confirm'] = False" in src
-    cas = CAS.read_text()
-    assert 'grasp_secured' in cas and 'grasp confirmed' in cas.lower()
     print('ok grasp_confirm_logic')
 
 if __name__ == '__main__':

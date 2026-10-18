@@ -1,4 +1,4 @@
-"""Smoke: coding-agent perceive mock → Astra-shaped keypoints validate (no sim/network)."""
+"""Smoke: coding-agent perceive modes, Codex-shaped keypoints → Astra-shaped validation (no sim/network)."""
 import json
 import sys
 from pathlib import Path
@@ -10,31 +10,46 @@ import coding_agent_slow as CAS
 
 def main():
     assert CAS.perceive_backend_mode('0') == 'off'
-    assert CAS.perceive_backend_mode('mock') == 'mock'
     assert CAS.perceive_backend_mode('codex') == 'codex'
     assert CAS.perceive_backend_mode('astra') == 'off'
+    for bad in ('mock', '1', 'on'):
+        try:
+            CAS.perceive_backend_mode(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f'perceive_backend_mode({bad!r}) should raise')
 
-    ctx = {
-        'language_goal': 'put the cream cheese in the basket',
-        'phase': 'perceive_start',
-        'extra_context': '',
-        'img_size': 512,
+    # Codex-shaped reply: no object_center_px, out-of-range depth, string match flag
+    reply = {
+        'goal_object_named': 'cream cheese',
+        'goal_object_where': 'cream cheese on the table near image centre',
+        'place_region_named': 'basket',
+        'place_region_where': 'basket toward image right',
+        'matched_language_goal': 'true',
+        'grasp_px': [196, 310],
+        'grasp_yaw_deg': 5,
+        'grasp_depth_m': 0.5,
+        'object_height_m': 0.025,
+        'place_px': [416.0, 243.0],
+        'object_held_by_gripper': 'false',
+        'confidence': 0.85,
     }
-    parsed, rec = CAS.call_perceive(ctx, mode='mock')
-    assert rec['backend'] == 'mock'
-    ok, errs, norm = CAS.validate_keypoints(parsed, img_size=512)
+    ok, errs, norm = CAS.validate_keypoints(reply, img_size=512)
     assert ok, errs
-    assert isinstance(norm['grasp_px'], list) and len(norm['grasp_px']) == 2
-    assert isinstance(norm['place_px'], list) and len(norm['place_px']) == 2
-    assert 0 <= norm['grasp_px'][0] < 512 and 0 <= norm['grasp_px'][1] < 512
+    assert norm['grasp_px'] == [196.0, 310.0]
+    assert norm['place_px'] == [416.0, 243.0]
+    assert norm['object_center_px'] == norm['grasp_px']
+    assert norm['grasp_depth_m'] == 0.06
+    assert norm['object_width_m'] == 0.05
     assert norm['matched_language_goal'] is True
-    assert 0.0 <= norm['grasp_depth_m'] <= 0.06
-    assert 'goal_object_named' in norm
+    assert norm['object_held_by_gripper'] is False
+    assert norm['goal_object_named'] == 'cream cheese'
 
-    # ketchup variant
-    ctx2 = dict(ctx, language_goal='put the ketchup in the basket')
-    p2, _ = CAS.call_perceive(ctx2, mode='mock')
-    assert 'ketchup' in p2['goal_object_named'].lower()
+    # matched_language_goal normalization
+    for raw, want in (('false', False), (False, False), ('unsure', None), (None, None)):
+        _, _, n = CAS.validate_keypoints(dict(reply, matched_language_goal=raw), img_size=512)
+        assert n['matched_language_goal'] is want, (raw, n['matched_language_goal'])
 
     # reject missing grasp
     bad_ok, bad_errs, _ = CAS.validate_keypoints({'place_px': [10, 10]}, img_size=512)
@@ -50,6 +65,12 @@ def main():
     assert any('grasp_px_oob' in e for e in oob_errs)
 
     # prompt mentions schema
+    ctx = {
+        'language_goal': 'put the cream cheese in the basket',
+        'phase': 'perceive_start',
+        'extra_context': '',
+        'img_size': 512,
+    }
     prompt = CAS.build_perceive_prompt(ctx)
     assert 'grasp_px' in prompt and 'matched_language_goal' in prompt
     assert 'cream cheese' in prompt.lower() or 'put the cream' in prompt.lower()
@@ -60,20 +81,9 @@ def main():
     assert 'harness_call_perceive' in harness
     assert 'coding_agent_perceive' in harness
 
-    # round-trip harness_call_perceive mock
-    h_parsed, h_rec = CAS.harness_call_perceive(
-        lang='put the butter in the basket',
-        phase='relook',
-        image_paths=[],
-        context='relook after empty close',
-        mode='mock',
-    )
-    assert h_rec['backend'] == 'mock'
-    assert 'butter' in h_parsed['goal_object_named'].lower()
-
     print(json.dumps({
         'ok': True,
-        'cases': ['mock_cream', 'mock_ketchup', 'reject_missing', 'reject_oob', 'prompt', 'harness_hook', 'harness_relook'],
+        'cases': ['modes', 'normalize_reply', 'match_normalize', 'reject_missing', 'reject_oob', 'prompt', 'harness_hook'],
         'sample_grasp_px': norm['grasp_px'],
         'sample_place_px': norm['place_px'],
     }))
