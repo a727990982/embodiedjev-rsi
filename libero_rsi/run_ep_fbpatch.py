@@ -16,9 +16,9 @@ Policy-visible signals (documented in ADAPTER.md):
 No simulator object/target ground-truth poses reach the policy.
 Jev state includes experience_brief: short actionable recoveries (when→prefer) + relevant lessons (when→instead), not a full prose dump; general triggers only.
 Hybrid Astra help: acting Jev may choose ask_astra/consult_astra; hard rules force Astra on stall/timeout or identity-unstable; a separate spectator/gate Jev (当局者迷旁观者清) may defer to Astra on distress signals; all share MAX_SLOW.
-Optional CODING_AGENT_SLOW=mock|codex|dual: coding-agent mid-episode monitor (EmbodiedEvo-style) replaces or dual-logs Astra slow-think; default off.
-Optional CODING_AGENT_PERCEIVE=0|mock|codex: coding-agent keypoint perceive at episode-start AND relook/escape_look (same Astra JSON shape → `_commit_keypoints`); default off. verify_grasp_identity stays on Astra.
-Optional EPISODE_START_PLAN=0|mock|codex|astra|auto: episode-start Great Wall global plan (predict neighbour block → push_aside/clear before first approach); auto inherits CODING_AGENT_SLOW/PERCEIVE; default off when those are off. Plan JSON persisted as start_plan.json; mid-episode slow-think only fine-tunes.
+Optional CODING_AGENT_SLOW=codex|dual: coding-agent mid-episode monitor (EmbodiedEvo-style) replaces or dual-logs Astra slow-think; default off.
+Optional CODING_AGENT_PERCEIVE=0|codex: coding-agent keypoint perceive at episode-start AND relook/escape_look (same Astra JSON shape → `_commit_keypoints`); default off. verify_grasp_identity stays on Astra.
+Optional EPISODE_START_PLAN=0|codex|astra|auto: episode-start Great Wall global plan (predict neighbour block → push_aside/clear before first approach); auto inherits CODING_AGENT_SLOW/PERCEIVE; default off when those are off. Plan JSON persisted as start_plan.json; mid-episode slow-think only fine-tunes.
 After close_gripper: proprio+lift grasp confirm (log grasp_confirm); secured → lift, suppress push_aside/local_deadend undo.
 Hard local-deadend rule: repeated local stall family (push_aside/clear_reapproach/raise_redescend/lateral) without progress, or push_aside episode/approach cap → retreat + global front relook + SYNCHRONOUS slow-think replan (existing CODING_AGENT_SLOW/ask_astra hybrid); Jev motion held until plan applied.
 Place-phase: after carry_to_place reached, N consecutive lower_to_place stall/timeout (MAX_PLACE_LOWER_STALL) or M lift↔lower cycles (MAX_PLACE_LIFT_LOWER_CYCLES) while TCP/held XY is over the place region → force open_gripper (log place_force_release); avoid endless lift↔lower thrash over basket.
@@ -46,6 +46,7 @@ except ModuleNotFoundError as ex:
 import dsl_libero as dsl
 from validate import validate
 import jev_experience as JX
+import coding_agent_slow as CAS
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 from robosuite.utils import camera_utils as CU
@@ -76,9 +77,11 @@ validate(LIB)  # Reject invalid libraries before creating a simulator or making 
 ASK_ASTRA_NAMES = frozenset({'ask_astra', 'consult_astra'})
 GATE_JEV = os.environ.get('GATE_JEV', '1') != '0'  # spectator Jev gate (旁观者清); 0 disables
 GATE_JEV_COOLDOWN = int(os.environ.get('GATE_JEV_COOLDOWN', '3'))  # min decisions between spectator Jev calls
-CODING_AGENT_SLOW = os.environ.get('CODING_AGENT_SLOW', '0')  # 0=off|mock|codex|dual — mid-episode coding-agent monitor pilot
-CODING_AGENT_PERCEIVE = os.environ.get('CODING_AGENT_PERCEIVE', '0')  # 0=off|mock|codex — start+relook keypoints via coding agent
-EPISODE_START_PLAN = os.environ.get('EPISODE_START_PLAN', '')  # 0|mock|codex|astra|auto — Great Wall start plan; empty=auto inherit
+CODING_AGENT_SLOW = os.environ.get('CODING_AGENT_SLOW', '0')  # 0=off|codex|dual — mid-episode coding-agent monitor pilot
+CODING_AGENT_PERCEIVE = os.environ.get('CODING_AGENT_PERCEIVE', '0')  # 0=off|codex — start+relook keypoints via coding agent
+EPISODE_START_PLAN = os.environ.get('EPISODE_START_PLAN', '')  # 0|codex|astra|auto — Great Wall start plan; empty=auto inherit
+# Reject unsupported backend values before creating a simulator or making model calls.
+CAS.backend_mode(CODING_AGENT_SLOW); CAS.perceive_backend_mode(CODING_AGENT_PERCEIVE); CAS.start_plan_backend_mode(EPISODE_START_PLAN)
 def _ensure_ask_astra_intents(lib):
     """Inject ask_astra / consult_astra into any library so Jev can request Astra help."""
     names = {i['name'] for i in lib.get('intents', [])}
@@ -236,7 +239,7 @@ def set_goal_id(confirmed, source, detail=None):
 def goal_id_confirmed():
     return GOAL_ID.get('confirmed') is True
 def perceive(context=None, phase=None):
-    """Keypoint perceive: Astra by default; CODING_AGENT_PERCEIVE=mock|codex replaces start+relook.
+    """Keypoint perceive: Astra by default; CODING_AGENT_PERCEIVE=codex replaces start+relook.
     Same JSON shape as Astra so `_commit_keypoints` is unchanged. On coding-agent failure → Astra fallback.
     """
     rgb, dep = rgbd()
@@ -252,7 +255,7 @@ def perceive(context=None, phase=None):
         _pmode = 'off'
         try: log(t=T[0], coding_agent_perceive_mode_error=True, err=str(_ex_pmode)[:200])
         except Exception: pass
-    if _pmode in ('mock', 'codex'):
+    if _pmode == 'codex':
         img_paths = []
         try:
             from PIL import Image as _PILImage
@@ -1114,7 +1117,7 @@ def _local_deadend_global_relook_sync_slow(reason, ns=None):
     result = f'deadend:{reason}'
     crit = f'local_deadend_global_relook:{reason}'
     try:
-        # Enrich last markers so _slow_ctx / mock see the deadend
+        # Enrich last markers so _slow_ctx sees the deadend
         EP['last_stall_issue'] = None  # cleared; slow should replan from global stills
         sr, so = _sync_slow(intent, result, crit=crit)
         detail['slow_result'] = sr
@@ -2069,7 +2072,7 @@ def _run_episode_start_plan():
                     lang=LANG, experience_brief=brief, start_hints=start_hints,
                     ep_dir=ep_dir, image_paths=images, mode=mode)
             except Exception as ce:
-                # Prefer Codex; fall back to Astra once if codex/mock hard-fails.
+                # Prefer Codex; fall back to Astra once if Codex hard-fails.
                 if mode == 'codex' and FALLBACK:
                     out['codex_error'] = str(ce)[:300]
                     prompt = CAS.build_start_prompt(CAS.pack_start_context(
@@ -2268,7 +2271,7 @@ def _prepare_slow_snapshot(ctx, crit, phase, both, image_tag):
     import coding_agent_slow as CAS
     mode = CAS.backend_mode(CODING_AGENT_SLOW)
     snapshot = {'mode': mode, 't': T[0], 'effort': ASTRA_EFFORT, 'coding_context': None}
-    if mode in ('mock', 'codex', 'dual'):
+    if mode in ('codex', 'dual'):
         brief = JX.build_jev_experience_brief(LIB, facts={}, ns={}, uses=EP.get('uses') or {}, dsl=dsl)
         # A unique file belongs to this request. No worker scans changing episode files.
         frame = os.path.join(ep_dir, f'slow_input_{image_tag}.jpg')
@@ -2288,7 +2291,7 @@ def _slow_worker(jpeg, prompt, meta, job_id, result_box, snapshot):
     try:
         import coding_agent_slow as CAS
         coding_rec = coding_parsed = None
-        if mode in ('mock', 'codex', 'dual'):
+        if mode in ('codex', 'dual'):
             try:
                 coding_parsed, coding_rec = CAS.call_monitor(snapshot['coding_context'], mode=mode)
                 events.append(dict(t=snapshot['t'], coding_agent_slow=True, mode=mode, job_id=job_id,
@@ -2298,9 +2301,9 @@ def _slow_worker(jpeg, prompt, meta, job_id, result_box, snapshot):
                 coding_rec = {'backend': mode, 'err': str(ce)}
                 events.append(dict(t=snapshot['t'], coding_agent_slow_error=True,
                                    mode=mode, job_id=job_id, err=str(ce)[:300]))
-                if mode in ('mock', 'codex'):
+                if mode == 'codex':
                     raise
-        if mode in ('mock', 'codex') and coding_parsed is not None:
+        if mode == 'codex' and coding_parsed is not None:
             parsed, rec = coding_parsed, coding_rec
         else:
             parsed, rec = AC.call(jpeg, prompt, meta, effort=snapshot['effort'])
@@ -2463,7 +2466,7 @@ def _sync_slow(intent, result, crit):
         import coding_agent_slow as CAS
         mode = CAS.backend_mode(CODING_AGENT_SLOW)
         coding_parsed = coding_rec = None
-        if mode in ('mock', 'codex', 'dual'):
+        if mode in ('codex', 'dual'):
             try:
                 snapshot = _prepare_slow_snapshot(ctx, crit, 'sync', both, f'sync_{_next_slow_job_id()}')
                 coding_parsed, coding_rec = CAS.call_monitor(snapshot['coding_context'], mode=mode)
@@ -2474,9 +2477,9 @@ def _sync_slow(intent, result, crit):
                     backend=(coding_rec or {}).get('backend'))
             except Exception as ce:
                 log(t=T[0], coding_agent_slow_error=True, mode=mode, sync=True, err=str(ce)[:300])
-                if mode in ('mock', 'codex'):
+                if mode == 'codex':
                     return f'sync_error:coding_agent:{ce}', None
-        if mode in ('mock', 'codex') and coding_parsed is not None:
+        if mode == 'codex' and coding_parsed is not None:
             return _finish_slow(coding_parsed, coding_rec or {'cost_usd': 0.0}, dep, both, intent, result, f'sync_cas_{mode}', crit, dec)
         p, rec = AC.call(AC.to_jpeg(both), prompt, {**META, 'phase': 'slow_think_sync'}, effort=ASTRA_EFFORT)
         if coding_parsed is not None and isinstance(rec, dict):
