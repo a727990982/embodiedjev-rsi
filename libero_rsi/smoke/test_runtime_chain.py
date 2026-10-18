@@ -90,7 +90,9 @@ def fake_run(destination, fail_start=False):
         elif 'perception module' in prompt:
             events.append('perception')
             assert kwargs['model'] == 'gpt-6-astra'
-            raw = CAS.mock_perceive({'language_goal': task.language})
+            raw = {'grasp_px': [200, 300], 'object_center_px': [200, 300],
+                   'place_px': [400, 240], 'matched_language_goal': True,
+                   'goal_object_named': 'butter', 'place_region_named': 'basket'}
         elif 'episode-START' in prompt:
             events.append('start_plan')
             if fail_start: raise RuntimeError('injected start failure')

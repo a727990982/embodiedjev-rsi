@@ -1,6 +1,6 @@
 # Call-chain audit — 2026-10-18
 
-Audited the PR branch starting at `e6ad561`. This is a code/interface and offline execution audit, not a LIBERO performance result.
+Audited the PR branch starting at `e6ad561`, then integrated the concurrent removal of mock backends at `4474c76` and reran the tests. This is a code/interface and offline execution audit, not a LIBERO performance result.
 
 ## Current invocation chain
 
@@ -33,7 +33,7 @@ No production `astra_client`, `AC.call`, `dual`, or alternate planner transport 
 ## Evidence
 
 - Before fixes, six targeted regression tests exposed nine failing assertions/subcases in the actual functions. They covered CLI failure handling, geometry validation, start-plan validation, relook execution, async freshness, and monitor context.
-- All 20 smoke scripts passed after the fixes, including 13 review regression cases, five Codex visual-routing cases, the call-chain audit cases, and two full-entrypoint cases using fake services.
+- All 20 smoke scripts passed after the fixes, including 11 review regression cases, five Codex visual-routing cases, the call-chain audit cases, and two full-entrypoint cases using fake services.
 - The full-entrypoint tests run the actual top-level script with fake LIBERO/MuJoCo observations, fake rotation math, a Jev fixture, and model replies. They cover normal startup, sync/async planning, a relook, finish/result writing, and a failed start plan that prevents Jev execution.
 - Python syntax and module-global symbol checks passed. These checks do not prove numerical control behavior.
 - The locally installed `codex exec --help` confirms the used CLI image/model/stdin options. No real model request was made during this audit.

@@ -32,7 +32,9 @@ class CallChainAuditTests(unittest.TestCase):
         for key, value in [('object_center_px', ['bad', 10]), ('object_center_px', [float('nan'), 1]),
                            ('object_height_m', float('nan')), ('grasp_depth_m', float('inf'))]:
             with self.subTest(key=key, value=value):
-                raw = CAS.mock_perceive({})
+                raw = {'grasp_px': [200, 300], 'object_center_px': [200, 300],
+                       'place_px': [400, 240], 'matched_language_goal': True,
+                       'object_height_m': .03, 'grasp_depth_m': .02}
                 raw[key] = value
                 self.assertFalse(CAS.validate_keypoints(raw)[0])
 
