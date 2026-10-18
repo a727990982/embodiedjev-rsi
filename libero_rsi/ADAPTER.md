@@ -21,11 +21,13 @@ The following private bench adapters are not included. Supply their directory vi
 | `astra_client.CapReached` | Exception raised when the service call budget is exhausted. |
 | `jev_choice.choose(state, instructions, criteria, meta=...)` | Return `(choice, probabilities, latency)`, where `choice` is a key of `criteria`. Used for both acting and spectator decisions. |
 
-Async Astra calls can overlap synchronous calls. External clients must support concurrent requests and protect their own shared budgets/ledgers. This repository cannot verify their implementation.
+The asynchronous worker calls Codex only. Astra visual calls and Jev decisions run on the main thread. External client implementations and their service budgets are not supplied or verified by this repository.
 
-Defaults are `CODING_AGENT_SLOW=codex`, `EPISODE_START_PLAN=codex`, and `CODING_AGENT_PERCEIVE=0` (Astra). Jev remains the per-intent decision backend. Explicit environment overrides still take precedence.
+Production roles are fixed: Codex performs start planning and slow-think, Astra provides visual perception and identity checks, and Jev chooses intents. The old `CODING_AGENT_SLOW`, `EPISODE_START_PLAN`, and `CODING_AGENT_PERCEIVE` environment switches are no longer used. There is no dual mode or automatic Astra planning fallback.
 
-The default Codex paths and `dual` additionally require the Codex CLI and its configured authentication. `dual` records a Codex proposal while applying Astra's answer; a Codex failure is recorded, without substituting a mock result. `mock` is a deterministic test backend and does not provide visual evidence of identity or clutter.
+Codex requires its CLI and configured authentication. Configure its model and reasoning effort with `CODING_AGENT_CODEX_MODEL` and `CODING_AGENT_CODEX_EFFORT`, and the executable with `CODING_AGENT_CODEX_BIN`. Explicit `mode='mock'` calls remain available in standalone planning helpers for offline tests; mock results do not provide visual evidence.
+
+For early recovery the harness abandons pending advice, refreshes keypoints/identity using Astra, and calls synchronous Codex planning. A perception failure stops that recovery attempt; a Codex failure is recorded without asking Astra to generate a plan. Existing help-intent labels (`ask_astra`, `consult_astra`, `defer_to_astra`) keep their names in libraries/logs but route to Codex planning.
 
 ## Policy-visible inputs
 

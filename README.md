@@ -4,7 +4,7 @@ Public snapshot of the LIBERO RSI / EmbodiedJev harness. This repo had no prior 
 
 | Path | Role |
 |---|---|
-| `libero_rsi/coding_agent_slow.py` | Episode-start plan, mid-episode slow-think, and perceive. Backends: `mock` (local, no network) and `codex` (`codex exec`). |
+| `libero_rsi/coding_agent_slow.py` | Codex episode-start planning and mid-episode slow-think via `codex exec`; explicit mock calls for offline tests. |
 | `libero_rsi/run_ep_fbpatch.py` | Episode harness: Jev intents, stall feedback, grasp confirm, local-deadend relook, place force-release. Needs LIBERO, MuJoCo, and the Astra/Jev clients to actually roll out. |
 | `libero_rsi/jev_experience.py` | Builds `experience_brief` (recoveries, lessons, and the start-plan prior) for Jev. |
 | `libero_rsi/validate.py` | Library validator. Imports sibling `dsl_libero.py`. |
@@ -15,11 +15,11 @@ Public snapshot of the LIBERO RSI / EmbodiedJev harness. This repo had no prior 
 
 ## Episode-start global plan
 
-`EPISODE_START_PLAN` defaults to `codex`. Overrides are `0` (off), `mock`, `codex`, `astra`, or `auto` (empty/`auto` inherits `CODING_AGENT_SLOW`, or `CODING_AGENT_PERCEIVE` when slow-think is off).
+The harness always uses Codex for episode-start planning.
 
 Before the first approach the planner reads `experience_brief` and writes one ordered skeleton (`start_plan.json`). `phase_order` is a full cycle per language-goal object: approach → grasp → lift → place → **retreat**, then the next object, ending with a retreat. Retreat after every place is filled in if the model omits it. Mid-episode slow-think only fine-tunes that skeleton.
 
-`mock` uses explicit start observations: `neighbour_observed=true` plus confirmed identity permits `push_aside`; conditional lessons and neighbour priors alone do not. Unknown or rejected identity leads to `relook`. `codex` calls the Codex CLI. `astra` is applied by the harness client.
+`mock` uses explicit start observations: `neighbour_observed=true` plus confirmed identity permits `push_aside`; conditional lessons and neighbour priors alone do not. Unknown or rejected identity leads to `relook`. Production calls the Codex CLI. The mock planner is only used by explicit offline test calls.
 
 The start planner cannot confirm target identity. Its proposed plan and the gated executable plan are both saved in `start_plan.json`. When the identity gate is unconfirmed, the harness queues a real `relook` intent before contact, even if the planner claims a match.
 
@@ -29,7 +29,7 @@ Repeated local stall-family actions (`push_aside`, `clear_reapproach`, `raise_re
 
 1. Retreat for a clear front (agentview) look.
 2. Global relook of keypoints.
-3. **Synchronous** slow-think (`CODING_AGENT_SLOW`, or the Astra hybrid) before Jev moves again.
+3. **Synchronous Codex** slow-think before Jev moves again.
 
 Caps: `LOCAL_DEADEND_N` (default 3), `MAX_LOCAL_DEADEND_GLOBAL` (default 2), `MAX_PUSH_ASIDE` (default 2), `MAX_PUSH_ASIDE_PER_APPROACH` (default 1).
 
@@ -39,17 +39,17 @@ After `close_gripper`, `_confirm_grasp_after_close` checks proprio (opening and 
 
 During place, consecutive `lower_to_place` stalls (`MAX_PLACE_LOWER_STALL`, default 3) or lift↔lower cycles (`MAX_PLACE_LIFT_LOWER_CYCLES`, default 2), while the held object is near the place XY, set `place_force_release` and force `open_gripper`.
 
-## Mock vs Codex
+## Fixed model roles
 
-By default, **Codex handles start planning and slow-think, Astra handles visual perception and identity verification, and Jev chooses each intent**. Existing environment variables override these defaults.
+| Role | Backend |
+|---|---|
+| Episode-start planning and sync/async slow-think | Codex CLI |
+| Visual perception, keypoints and identity verification | Astra |
+| Per-step intent selection and spectator decision | Jev |
 
-| Env | Unset default | `0` | `mock` | `codex` | Other modes |
-|---|---|---|---|---|---|
-| `CODING_AGENT_SLOW` | Codex monitor | Astra slow-think | local monitor | Codex monitor | `dual`: log Codex, apply Astra |
-| `CODING_AGENT_PERCEIVE` | Astra keypoints | Astra keypoints | local keypoints | Codex keypoints | — |
-| `EPISODE_START_PLAN` | Codex start plan | planning disabled | local start plan | Codex start plan | `astra`: Astra planner; empty/`auto`: inherit slow/perception backend |
+The harness has no dual/comparison mode, Astra planning backend, or Codex perception backend. The former `CODING_AGENT_SLOW`, `EPISODE_START_PLAN`, and `CODING_AGENT_PERCEIVE` role switches are no longer read. `mode='mock'` remains available only when explicitly calling the standalone planning helpers in offline tests.
 
-The two Codex defaults are independent: overriding slow-think does not change start planning unless `EPISODE_START_PLAN` is explicitly set to empty/`auto`. In `dual`, a Codex error is logged and Astra continues. Existing Astra fallback paths remain available; this default selection does not remove them.
+Early recovery now refreshes perception through Astra and then calls Codex to plan. Codex failures are recorded; they do not switch the planning role to Astra. The existing `ask_astra`, `consult_astra`, and `defer_to_astra` intent labels are retained for the shipped libraries and logs, but their help path invokes Codex planning.
 
 Codex looks up `codex` on `PATH`, or `CODING_AGENT_CODEX_BIN`. A proxy is used only when `CODING_AGENT_HTTP_PROXY` or `CODING_AGENT_SOCKS` is set. Do not commit proxy URLs, keys, or host details.
 
@@ -57,7 +57,7 @@ Async slow-think captures a detached copy of policy state and a unique image bef
 
 ## Running an episode
 
-This snapshot does **not** include `astra_client` or `jev_choice`. Actual rollouts require those external clients, LIBERO with its assets, MuJoCo/robosuite, and rendering dependencies. The client interfaces and policy/diagnostic boundary are documented in [libero_rsi/ADAPTER.md](libero_rsi/ADAPTER.md). Setting the coding backends to `mock` does not make the full harness offline: identity verification and Jev execution still need the clients.
+This snapshot does **not** include `astra_client` or `jev_choice`. Actual rollouts require those external clients, LIBERO with its assets, MuJoCo/robosuite, and rendering dependencies. The client interfaces and policy/diagnostic boundary are documented in [libero_rsi/ADAPTER.md](libero_rsi/ADAPTER.md). Offline mock tests do not replace the clients required by the full harness.
 
 Once the external dependencies are installed:
 
@@ -81,6 +81,6 @@ test "$failed" -eq 0
 
 Each test adds `libero_rsi/` to `sys.path`, so `validate` and `dsl_libero` resolve as siblings. `numpy` is required for the tests that import it. No simulator and no network.
 
-The regression suite executes selected production functions with environment/model doubles, covering identity authorization, observed versus prior clutter, dual routing, event timestamps, async snapshots, diagnostic isolation, recovery failures, and validation of every shipped library. These tests do not establish simulation success.
+The regression suite executes selected production functions with environment/model doubles, covering identity authorization, observed versus prior clutter, fixed backend routing and Codex failure handling, event timestamps, async snapshots, diagnostic isolation, recovery failures, and validation of every shipped library. These tests do not establish simulation success.
 
 `libs/smoke_copies/` contains duplicate library fixtures retained from the original snapshot; these are not independent policy variants or experimental results.

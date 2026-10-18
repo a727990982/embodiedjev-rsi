@@ -13,44 +13,17 @@ import jev_experience as JX
 
 
 def main():
-    # Resolve both the module and harness defaults without invoking models or the simulator.
-    with patch.dict(os.environ, {}, clear=True):
+    # Production defaults stay Codex even if an old role-switch env is present.
+    with patch.dict(os.environ, {'CODING_AGENT_SLOW': 'mock', 'EPISODE_START_PLAN': 'astra'}, clear=True):
         assert CAS.backend_mode() == 'codex'
         assert CAS.start_plan_backend_mode() == 'codex'
-        assert CAS.perceive_backend_mode() == 'off'  # harness uses Astra
-        tree = ast.parse((ROOT / 'run_ep_fbpatch.py').read_text())
-        config_names = {'CODING_AGENT_SLOW', 'EPISODE_START_PLAN', 'CODING_AGENT_PERCEIVE'}
-        assignments = [n for n in tree.body if isinstance(n, ast.Assign)
-                       and any(isinstance(t, ast.Name) and t.id in config_names for t in n.targets)]
-        config = {'os': os}
-        exec(compile(ast.Module(body=assignments, type_ignores=[]), '<defaults>', 'exec'), config)
-        assert config['CODING_AGENT_SLOW'] == 'codex'
-        assert config['EPISODE_START_PLAN'] == 'codex'
-        assert config['CODING_AGENT_PERCEIVE'] == '0'
-        os.environ['CODING_AGENT_SLOW'] = 'mock'
-        assert CAS.backend_mode() == 'mock'
-        assert CAS.start_plan_backend_mode() == 'codex'
-        assert CAS.start_plan_backend_mode('auto') == 'mock'
-        # The public start-plan entry must honor its default too, not substitute auto.
         with patch.object(CAS, 'call_codex', return_value=(
             {'issue': 'ok', 'intervene': False, 'plan': []}, {'backend': 'codex'})) as call:
             _, rec = CAS.call_start_plan({'language_goal': 'place object'})
             call.assert_called_once()
             assert rec['backend'] == 'codex_start'
-
-    assert CAS.start_plan_backend_mode('0') == 'off'
     assert CAS.start_plan_backend_mode('mock') == 'mock'
     assert CAS.start_plan_backend_mode('codex') == 'codex'
-    assert CAS.start_plan_backend_mode('astra') == 'astra'
-
-    # auto inherits CODING_AGENT_SLOW
-    os.environ['CODING_AGENT_SLOW'] = 'codex'
-    os.environ.pop('CODING_AGENT_PERCEIVE', None)
-    assert CAS.start_plan_backend_mode('') == 'codex'
-    assert CAS.start_plan_backend_mode('auto') == 'codex'
-    os.environ['CODING_AGENT_SLOW'] = '0'
-    assert CAS.start_plan_backend_mode('') == 'off'
-    os.environ['CODING_AGENT_SLOW'] = 'mock'
 
     # 1) Observed neighbour + confirmed identity → push_aside lead
     brief = {
@@ -186,7 +159,6 @@ def main():
 
     # 6) Harness hooks
     harness = (Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py').read_text()
-    assert 'EPISODE_START_PLAN' in harness
     assert '_run_episode_start_plan' in harness
     assert 'start_plan.json' in harness
     assert "'experience_brief': brief" in harness

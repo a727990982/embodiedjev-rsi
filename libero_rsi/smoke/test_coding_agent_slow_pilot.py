@@ -12,9 +12,7 @@ import coding_agent_slow as CAS
 
 
 def main():
-    assert CAS.backend_mode('0') == 'off'
     assert CAS.backend_mode('mock') == 'mock'
-    assert CAS.backend_mode('1') == 'mock'
     assert CAS.backend_mode('codex') == 'codex'
 
     # 1) Neighbour stall → push_aside
@@ -95,9 +93,9 @@ def main():
     assert 'push_aside' in prompt and 'raise_redescend' in prompt
     assert 'Reply ONLY one JSON object' in prompt
 
-    # 7) Harness still documents CODING_AGENT_SLOW hook
+    # 7) Harness retains the Codex monitor hook
     harness = (Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py').read_text()
-    assert 'CODING_AGENT_SLOW' in harness
+    assert "CAS.call_monitor(snapshot['coding_context'], mode='codex')" in harness
     assert 'coding_agent_slow' in harness
 
     print(json.dumps({

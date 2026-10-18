@@ -5,7 +5,7 @@ When local/wrist near-grasp stall family thrash has no useful solution:
 1. Abort local push_aside / move_above / descend loop
 2. Retreat upward for a clear **front (agentview)** look
 3. Global relook keypoints
-4. **Synchronous** `_sync_slow` (CODING_AGENT_SLOW / Astra hybrid) — Jev held until plan applied
+4. **Synchronous** `_sync_slow` (Codex planner) — Jev held until plan applied
 5. Cap `push_aside` per episode / per approach
 
 ## Triggers

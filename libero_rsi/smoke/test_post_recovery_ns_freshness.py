@@ -2,22 +2,14 @@
 import ast
 from pathlib import Path
 import numpy as np
+from test_review_regressions import functions
 
 HARNESS = Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py'
 
 
 def should_open_on_intervention(*, closed, igo_n, issue=None, failure_class=None):
-    """Mirror of harness _should_open_on_intervention."""
-    if not closed:
-        return False
-    issue = str(issue or failure_class or '')
-    if issue in ('wrong_object', 'empty_grasp', 'tip_push'):
-        return True
-    if igo_n is False:
-        return True
-    if igo_n is True:
-        return False
-    return True
+    scope = functions('_should_open_on_intervention', EP={'closed': closed})
+    return scope['_should_open_on_intervention'](igo_n=igo_n, issue=issue, failure_class=failure_class)
 
 
 def effective_grasp(per, patch, rshape_dz=0.0):
@@ -35,7 +27,6 @@ def main():
         'recovery_mutated', 'post_recovery_ns_refresh',
         'ns_gate, preds_gate = namespace()', 'f_gate = facts(ns_gate, preds_gate)',
         '_should_open_on_intervention',
-        'Do not unconditionally reopen here',
     ):
         assert needle in src, f'missing: {needle}'
 
