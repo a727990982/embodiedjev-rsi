@@ -2,7 +2,9 @@
 import json
 import os
 import sys
+import ast
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -11,6 +13,31 @@ import jev_experience as JX
 
 
 def main():
+    # Resolve both the module and harness defaults without invoking models or the simulator.
+    with patch.dict(os.environ, {}, clear=True):
+        assert CAS.backend_mode() == 'codex'
+        assert CAS.start_plan_backend_mode() == 'codex'
+        assert CAS.perceive_backend_mode() == 'off'  # harness uses Astra
+        tree = ast.parse((ROOT / 'run_ep_fbpatch.py').read_text())
+        config_names = {'CODING_AGENT_SLOW', 'EPISODE_START_PLAN', 'CODING_AGENT_PERCEIVE'}
+        assignments = [n for n in tree.body if isinstance(n, ast.Assign)
+                       and any(isinstance(t, ast.Name) and t.id in config_names for t in n.targets)]
+        config = {'os': os}
+        exec(compile(ast.Module(body=assignments, type_ignores=[]), '<defaults>', 'exec'), config)
+        assert config['CODING_AGENT_SLOW'] == 'codex'
+        assert config['EPISODE_START_PLAN'] == 'codex'
+        assert config['CODING_AGENT_PERCEIVE'] == '0'
+        os.environ['CODING_AGENT_SLOW'] = 'mock'
+        assert CAS.backend_mode() == 'mock'
+        assert CAS.start_plan_backend_mode() == 'codex'
+        assert CAS.start_plan_backend_mode('auto') == 'mock'
+        # The public start-plan entry must honor its default too, not substitute auto.
+        with patch.object(CAS, 'call_codex', return_value=(
+            {'issue': 'ok', 'intervene': False, 'plan': []}, {'backend': 'codex'})) as call:
+            _, rec = CAS.call_start_plan({'language_goal': 'place object'})
+            call.assert_called_once()
+            assert rec['backend'] == 'codex_start'
+
     assert CAS.start_plan_backend_mode('0') == 'off'
     assert CAS.start_plan_backend_mode('mock') == 'mock'
     assert CAS.start_plan_backend_mode('codex') == 'codex'

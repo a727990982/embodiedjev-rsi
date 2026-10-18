@@ -15,7 +15,7 @@ Public snapshot of the LIBERO RSI / EmbodiedJev harness. This repo had no prior 
 
 ## Episode-start global plan
 
-`EPISODE_START_PLAN` is `0` (off), `mock`, `codex`, `astra`, or `auto` (empty/`auto` inherits `CODING_AGENT_SLOW`, or `CODING_AGENT_PERCEIVE` when slow-think is off).
+`EPISODE_START_PLAN` defaults to `codex`. Overrides are `0` (off), `mock`, `codex`, `astra`, or `auto` (empty/`auto` inherits `CODING_AGENT_SLOW`, or `CODING_AGENT_PERCEIVE` when slow-think is off).
 
 Before the first approach the planner reads `experience_brief` and writes one ordered skeleton (`start_plan.json`). `phase_order` is a full cycle per language-goal object: approach → grasp → lift → place → **retreat**, then the next object, ending with a retreat. Retreat after every place is filled in if the model omits it. Mid-episode slow-think only fine-tunes that skeleton.
 
@@ -41,11 +41,15 @@ During place, consecutive `lower_to_place` stalls (`MAX_PLACE_LOWER_STALL`, defa
 
 ## Mock vs Codex
 
-| Env | `0` / unset | `mock` | `codex` | other |
-|---|---|---|---|---|
-| `CODING_AGENT_SLOW` | Astra slow-think | local monitor | Codex monitor | `dual` calls Codex for logging and still applies Astra; Codex errors are logged and Astra continues |
-| `CODING_AGENT_PERCEIVE` | Astra keypoints | local keypoints | Codex keypoints | off |
-| `EPISODE_START_PLAN` | inherit, else off | local start plan | Codex start plan | `astra` uses the harness client |
+By default, **Codex handles start planning and slow-think, Astra handles visual perception and identity verification, and Jev chooses each intent**. Existing environment variables override these defaults.
+
+| Env | Unset default | `0` | `mock` | `codex` | Other modes |
+|---|---|---|---|---|---|
+| `CODING_AGENT_SLOW` | Codex monitor | Astra slow-think | local monitor | Codex monitor | `dual`: log Codex, apply Astra |
+| `CODING_AGENT_PERCEIVE` | Astra keypoints | Astra keypoints | local keypoints | Codex keypoints | — |
+| `EPISODE_START_PLAN` | Codex start plan | planning disabled | local start plan | Codex start plan | `astra`: Astra planner; empty/`auto`: inherit slow/perception backend |
+
+The two Codex defaults are independent: overriding slow-think does not change start planning unless `EPISODE_START_PLAN` is explicitly set to empty/`auto`. In `dual`, a Codex error is logged and Astra continues. Existing Astra fallback paths remain available; this default selection does not remove them.
 
 Codex looks up `codex` on `PATH`, or `CODING_AGENT_CODEX_BIN`. A proxy is used only when `CODING_AGENT_HTTP_PROXY` or `CODING_AGENT_SOCKS` is set. Do not commit proxy URLs, keys, or host details.
 

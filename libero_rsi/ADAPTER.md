@@ -23,7 +23,9 @@ The following private bench adapters are not included. Supply their directory vi
 
 Async Astra calls can overlap synchronous calls. External clients must support concurrent requests and protect their own shared budgets/ledgers. This repository cannot verify their implementation.
 
-`CODING_AGENT_SLOW=codex` and `dual` additionally require the Codex CLI and its configured authentication. `dual` records a Codex proposal while applying Astra's answer; a Codex failure is recorded, without substituting a mock result. `mock` is a deterministic test backend and does not provide visual evidence of identity or clutter.
+Defaults are `CODING_AGENT_SLOW=codex`, `EPISODE_START_PLAN=codex`, and `CODING_AGENT_PERCEIVE=0` (Astra). Jev remains the per-intent decision backend. Explicit environment overrides still take precedence.
+
+The default Codex paths and `dual` additionally require the Codex CLI and its configured authentication. `dual` records a Codex proposal while applying Astra's answer; a Codex failure is recorded, without substituting a mock result. `mock` is a deterministic test backend and does not provide visual evidence of identity or clutter.
 
 ## Policy-visible inputs
 

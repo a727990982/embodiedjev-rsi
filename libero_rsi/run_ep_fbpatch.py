@@ -16,9 +16,9 @@ Policy-visible signals (documented in ADAPTER.md):
 No simulator object/target ground-truth poses reach the policy.
 Jev state includes experience_brief: short actionable recoveries (when→prefer) + relevant lessons (when→instead), not a full prose dump; general triggers only.
 Hybrid Astra help: acting Jev may choose ask_astra/consult_astra; hard rules force Astra on stall/timeout or identity-unstable; a separate spectator/gate Jev (当局者迷旁观者清) may defer to Astra on distress signals; all share MAX_SLOW.
-Optional CODING_AGENT_SLOW=mock|codex|dual: coding-agent mid-episode monitor (EmbodiedEvo-style) replaces or dual-logs Astra slow-think; default off.
+Optional CODING_AGENT_SLOW=mock|codex|dual: coding-agent mid-episode monitor (EmbodiedEvo-style) replaces or dual-logs Astra slow-think; default codex.
 Optional CODING_AGENT_PERCEIVE=0|mock|codex: coding-agent keypoint perceive at episode-start AND relook/escape_look (same Astra JSON shape → `_commit_keypoints`); default off. verify_grasp_identity stays on Astra.
-Optional EPISODE_START_PLAN=0|mock|codex|astra|auto: episode-start Great Wall global plan (predict neighbour block → push_aside/clear before first approach); auto inherits CODING_AGENT_SLOW/PERCEIVE; default off when those are off. Plan JSON persisted as start_plan.json; mid-episode slow-think only fine-tunes.
+Optional EPISODE_START_PLAN=0|mock|codex|astra|auto: episode-start Great Wall global plan (predict neighbour block → push_aside/clear before first approach); default codex; explicit auto inherits CODING_AGENT_SLOW/PERCEIVE. Plan JSON persisted as start_plan.json; mid-episode slow-think only fine-tunes.
 After close_gripper: proprio+lift grasp confirm (log grasp_confirm); secured → lift, suppress push_aside/local_deadend undo.
 Hard local-deadend rule: repeated local stall family (push_aside/clear_reapproach/raise_redescend/lateral) without progress, or push_aside episode/approach cap → retreat + global front relook + SYNCHRONOUS slow-think replan (existing CODING_AGENT_SLOW/ask_astra hybrid); Jev motion held until plan applied.
 Place-phase: after carry_to_place reached, N consecutive lower_to_place stall/timeout (MAX_PLACE_LOWER_STALL) or M lift↔lower cycles (MAX_PLACE_LIFT_LOWER_CYCLES) while TCP/held XY is over the place region → force open_gripper (log place_force_release); avoid endless lift↔lower thrash over basket.
@@ -76,9 +76,9 @@ validate(LIB)  # Reject invalid libraries before creating a simulator or making 
 ASK_ASTRA_NAMES = frozenset({'ask_astra', 'consult_astra'})
 GATE_JEV = os.environ.get('GATE_JEV', '1') != '0'  # spectator Jev gate (旁观者清); 0 disables
 GATE_JEV_COOLDOWN = int(os.environ.get('GATE_JEV_COOLDOWN', '3'))  # min decisions between spectator Jev calls
-CODING_AGENT_SLOW = os.environ.get('CODING_AGENT_SLOW', '0')  # 0=off|mock|codex|dual — mid-episode coding-agent monitor pilot
+CODING_AGENT_SLOW = os.environ.get('CODING_AGENT_SLOW', 'codex')  # default codex; 0=Astra, mock=local, dual=Codex log + Astra apply
 CODING_AGENT_PERCEIVE = os.environ.get('CODING_AGENT_PERCEIVE', '0')  # 0=off|mock|codex — start+relook keypoints via coding agent
-EPISODE_START_PLAN = os.environ.get('EPISODE_START_PLAN', '')  # 0|mock|codex|astra|auto — Great Wall start plan; empty=auto inherit
+EPISODE_START_PLAN = os.environ.get('EPISODE_START_PLAN', 'codex')  # default codex; 0=off; empty/auto explicitly inherits backend
 def _ensure_ask_astra_intents(lib):
     """Inject ask_astra / consult_astra into any library so Jev can request Astra help."""
     names = {i['name'] for i in lib.get('intents', [])}
@@ -1975,7 +1975,7 @@ def _run_episode_start_plan():
     Uses CODING_AGENT / EPISODE_START_PLAN; applies via `_apply_episode_plan`; persists start_plan.json.
     Mid-episode slow-think must only fine-tune this prior, not replan from zero."""
     import coding_agent_slow as CAS
-    mode = CAS.start_plan_backend_mode(EPISODE_START_PLAN if 'EPISODE_START_PLAN' in globals() else os.environ.get('EPISODE_START_PLAN', ''))
+    mode = CAS.start_plan_backend_mode(EPISODE_START_PLAN if 'EPISODE_START_PLAN' in globals() else os.environ.get('EPISODE_START_PLAN', 'codex'))
     out = {'mode': mode, 'applied': False, 'plan_done': [], 'error': None}
     if mode == 'off':
         return out

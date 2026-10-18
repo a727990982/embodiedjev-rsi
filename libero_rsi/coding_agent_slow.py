@@ -10,13 +10,15 @@ an ordered predictive plan (push_aside / clear / relook / …) before the first
 approach — RSI start-of-episode reflection; mid-episode slow-think only fine-tunes.
 
 Backends (env CODING_AGENT_SLOW):
-  0 / unset  — disabled (harness uses Astra as today)
+  unset      — codex
+  0 / off    — coding monitor disabled (harness uses Astra)
   mock       — deterministic local plan; no network (smoke / CI)
   codex      — `codex exec` on PATH (or CODING_AGENT_CODEX_BIN). Optional proxy via
                CODING_AGENT_HTTP_PROXY / CODING_AGENT_SOCKS; unset means direct.
   dual       — call coding agent AND leave Astra path for A/B logging (harness dual)
 
 Episode-start (env EPISODE_START_PLAN):
+  unset      — codex (independent of the slow-think override)
   0 / off    — disabled
   mock|codex — start planner backend
   astra      — harness uses Astra with the start-plan prompt
@@ -108,7 +110,7 @@ Context JSON:
 
 
 def backend_mode(raw: Optional[str] = None) -> str:
-    v = (raw if raw is not None else os.environ.get('CODING_AGENT_SLOW', '0')).strip().lower()
+    v = (raw if raw is not None else os.environ.get('CODING_AGENT_SLOW', 'codex')).strip().lower()
     if v in ('', '0', 'off', 'false', 'no', 'astra'):
         return 'off'
     if v in ('1', 'on', 'true', 'yes'):
@@ -809,8 +811,8 @@ def harness_call_perceive(
 # ---------------------------------------------------------------------------
 # Episode-start "Great Wall" global plan (predictive; before first approach)
 # Env EPISODE_START_PLAN=0|mock|codex|astra|auto
-#   auto (default when unset/empty): inherit CODING_AGENT_SLOW if mock|codex|dual
-#     (dual → codex); else off. Explicit 0/off disables even if CODING_AGENT_SLOW on.
+#   unset: codex. Explicit empty/auto inherits CODING_AGENT_SLOW/PERCEIVE.
+#   Explicit 0/off disables planning even if CODING_AGENT_SLOW is on.
 # Prefer Codex; harness may fall back to Astra when mode=astra or codex fails.
 # Plan step vocabulary matches mid-episode slow-think → `_apply_episode_plan`.
 # ---------------------------------------------------------------------------
@@ -881,9 +883,9 @@ Context JSON:
 
 
 def start_plan_backend_mode(raw: Optional[str] = None) -> str:
-    """Resolve EPISODE_START_PLAN; empty/auto inherits CODING_AGENT_SLOW."""
+    """Default to Codex; explicit empty/auto inherits CODING_AGENT_SLOW/PERCEIVE."""
     if raw is None:
-        raw = os.environ.get('EPISODE_START_PLAN', '')
+        raw = os.environ.get('EPISODE_START_PLAN', 'codex')
     v = (raw or '').strip().lower()
     if v in ('0', 'off', 'false', 'no'):
         return 'off'
@@ -891,7 +893,7 @@ def start_plan_backend_mode(raw: Optional[str] = None) -> str:
         return v
     if v in ('1', 'on', 'true', 'yes', 'auto', ''):
         # Inherit mid-episode coding-agent backend when pilot already on.
-        slow = backend_mode(os.environ.get('CODING_AGENT_SLOW', '0'))
+        slow = backend_mode(os.environ.get('CODING_AGENT_SLOW', 'codex'))
         if slow == 'dual':
             return 'codex'
         if slow in ('mock', 'codex'):
@@ -1177,7 +1179,7 @@ def call_start_plan(
     timeout_s: float = 180.0,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Run start-plan backend; return (normalized_plan, rec)."""
-    mode = start_plan_backend_mode(mode if mode is not None else (os.environ.get('EPISODE_START_PLAN') or 'auto'))
+    mode = start_plan_backend_mode(mode)
     if mode == 'off':
         raise RuntimeError('episode_start_plan_disabled')
     images = list(ctx.get('keyframe_paths') or [])[:4]
