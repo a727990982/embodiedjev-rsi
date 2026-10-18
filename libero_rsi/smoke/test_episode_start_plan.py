@@ -11,39 +11,15 @@ import jev_experience as JX
 
 
 def main():
-    assert CAS.start_plan_backend_mode('0') == 'off'
+    assert CAS.start_plan_backend_mode() == 'codex'
     assert CAS.start_plan_backend_mode('codex') == 'codex'
-    assert CAS.start_plan_backend_mode('astra') == 'astra'
-    for bad in ('mock', '1', 'on'):
+    for bad in ('mock', 'dual', 'astra', '0', 'off', '1', 'on', 'auto'):
         try:
             CAS.start_plan_backend_mode(bad)
         except ValueError:
             pass
         else:
-            raise AssertionError(f'start_plan_backend_mode({bad!r}) should raise')
-
-    # auto inherits Codex from CODING_AGENT_SLOW=codex|dual or CODING_AGENT_PERCEIVE=codex
-    saved = {k: os.environ.get(k) for k in ('CODING_AGENT_SLOW', 'CODING_AGENT_PERCEIVE')}
-    try:
-        os.environ['CODING_AGENT_SLOW'] = 'codex'
-        os.environ.pop('CODING_AGENT_PERCEIVE', None)
-        assert CAS.start_plan_backend_mode('') == 'codex'
-        assert CAS.start_plan_backend_mode('auto') == 'codex'
-        os.environ['CODING_AGENT_SLOW'] = 'dual'
-        assert CAS.start_plan_backend_mode('') == 'codex'
-        os.environ['CODING_AGENT_SLOW'] = '0'
-        assert CAS.start_plan_backend_mode('') == 'off'
-        os.environ['CODING_AGENT_PERCEIVE'] = 'codex'
-        assert CAS.start_plan_backend_mode('auto') == 'codex'
-        os.environ['CODING_AGENT_PERCEIVE'] = '0'
-        assert CAS.start_plan_backend_mode('auto') == 'off'
-        assert CAS.start_plan_backend_mode('0') == 'off'
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+            raise AssertionError(f'unsupported backend {bad!r} was accepted')
 
     # 1) Codex-shaped neighbour plan; place without retreat is normalized
     lang = 'pick up the cream cheese and place it in the basket'
@@ -160,7 +136,6 @@ def main():
 
     # 6) Harness hooks
     harness = (Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py').read_text()
-    assert 'EPISODE_START_PLAN' in harness
     assert '_run_episode_start_plan' in harness
     assert 'start_plan.json' in harness
     assert "'experience_brief': brief" in harness
@@ -170,7 +145,7 @@ def main():
 
     print(json.dumps({
         'ok': True,
-        'cases': ['modes', 'auto_inherit', 'neighbour_push', 'reject_bad', 'step1_inject',
+        'cases': ['modes', 'neighbour_push', 'reject_bad', 'step1_inject',
                   'validate_retreat', 'identity_gate', 'prompt', 'brief_inject', 'harness_hook'],
         'sample_plan': norm['plan'],
         'step1_must': norm['step1_must'],

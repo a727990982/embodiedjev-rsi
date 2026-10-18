@@ -12,18 +12,15 @@ import coding_agent_slow as CAS
 
 
 def main():
-    assert CAS.backend_mode('0') == 'off'
-    assert CAS.backend_mode('') == 'off'
-    assert CAS.backend_mode('astra') == 'off'
+    assert CAS.backend_mode() == 'codex'
     assert CAS.backend_mode('codex') == 'codex'
-    assert CAS.backend_mode('dual') == 'dual'
-    for bad in ('mock', '1', 'on'):
+    for bad in ('mock', 'dual', 'astra', '0', 'off', '1', 'on', 'auto'):
         try:
             CAS.backend_mode(bad)
         except ValueError:
             pass
         else:
-            raise AssertionError(f'backend_mode({bad!r}) should raise')
+            raise AssertionError(f'unsupported backend {bad!r} was accepted')
 
     # 1) Codex-shaped neighbour push_aside plan
     neighbour = {
@@ -97,7 +94,6 @@ def main():
 
     # 6) Harness still documents CODING_AGENT_SLOW hook
     harness = (Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py').read_text()
-    assert 'CODING_AGENT_SLOW' in harness
     assert 'coding_agent_slow' in harness
 
     print(json.dumps({

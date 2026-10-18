@@ -15,12 +15,11 @@ Policy-visible signals (documented in ADAPTER.md):
   success: official env (BDDL check_success) -> done flag. Binary only, ends the episode.
 No simulator object/target ground-truth poses reach the policy.
 Jev state includes experience_brief: short actionable recoveries (when→prefer) + relevant lessons (when→instead), not a full prose dump; general triggers only.
-Hybrid Astra help: acting Jev may choose ask_astra/consult_astra; hard rules force Astra on stall/timeout or identity-unstable; a separate spectator/gate Jev (当局者迷旁观者清) may defer to Astra on distress signals; all share MAX_SLOW.
-Optional CODING_AGENT_SLOW=codex|dual: coding-agent mid-episode monitor (EmbodiedEvo-style) replaces or dual-logs Astra slow-think; default off.
-Optional CODING_AGENT_PERCEIVE=0|codex: coding-agent keypoint perceive at episode-start AND relook/escape_look (same Astra JSON shape → `_commit_keypoints`); default off. verify_grasp_identity stays on Astra.
-Optional EPISODE_START_PLAN=0|codex|astra|auto: episode-start Great Wall global plan (predict neighbour block → push_aside/clear before first approach); auto inherits CODING_AGENT_SLOW/PERCEIVE; default off when those are off. Plan JSON persisted as start_plan.json; mid-episode slow-think only fine-tunes.
+Codex planning help: the existing ask_astra/consult_astra intent names request Codex; hard rules and a spectator Jev may request synchronous help on distress signals; all share MAX_SLOW.
+Codex handles episode-start global planning and sync/async slow-think. Astra, invoked through Codex CLI, handles visual perception and identity verification; Jev selects each intent. Model roles are fixed.
+Plan JSON is persisted as start_plan.json; mid-episode slow-think fine-tunes the episode plan.
 After close_gripper: proprio+lift grasp confirm (log grasp_confirm); secured → lift, suppress push_aside/local_deadend undo.
-Hard local-deadend rule: repeated local stall family (push_aside/clear_reapproach/raise_redescend/lateral) without progress, or push_aside episode/approach cap → retreat + global front relook + SYNCHRONOUS slow-think replan (existing CODING_AGENT_SLOW/ask_astra hybrid); Jev motion held until plan applied.
+Hard local-deadend rule: repeated local stall family (push_aside/clear_reapproach/raise_redescend/lateral) without progress, or push_aside episode/approach cap → retreat + global front relook + SYNCHRONOUS slow-think replan (Codex slow-think); Jev motion held until plan applied.
 Place-phase: after carry_to_place reached, N consecutive lower_to_place stall/timeout (MAX_PLACE_LOWER_STALL) or M lift↔lower cycles (MAX_PLACE_LIFT_LOWER_CYCLES) while TCP/held XY is over the place region → force open_gripper (log place_force_release); avoid endless lift↔lower thrash over basket.
 Freshness/isolation: each async slow-think job has a unique job_id + private result_box (abandoned workers cannot overwrite a newer job); after keypoint refresh, close is blocked until TCP re-approaches the new grasp XY; recovery mutations recompute namespace/facts before execute and spectator.
 """
@@ -28,7 +27,7 @@ import os, sys, json, time, gc, re, threading, queue
 os.environ.setdefault('MUJOCO_GL', 'egl'); os.environ.setdefault('PYOPENGL_PLATFORM', 'egl')
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
-# Optional neighbors from a larger bench checkout (astra_client, dsl_libero, jev_choice).
+# Optional Jev client from a larger bench checkout.
 for _extra in (
     os.path.join(_HERE, 'bench_common'),
     os.path.abspath(os.path.join(_HERE, '..', '..', 'bench', 'common')),
@@ -37,16 +36,15 @@ for _extra in (
         sys.path.insert(0, _extra)
 import numpy as np
 try:
-    import astra_client as AC, jev_choice as JC
+    import jev_choice as JC
 except ModuleNotFoundError as ex:
-    if ex.name not in ('astra_client', 'jev_choice'):
+    if ex.name != 'jev_choice':
         raise
     raise SystemExit(f'Missing external client {ex.name}. See libero_rsi/ADAPTER.md; '
                      'provide the bench clients via PYTHONPATH or libero_rsi/bench_common/.') from ex
 import dsl_libero as dsl
 from validate import validate
 import jev_experience as JX
-import coding_agent_slow as CAS
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 from robosuite.utils import camera_utils as CU
@@ -67,7 +65,7 @@ MAX_PLACE_LOWER_STALL = int(os.environ.get('MAX_PLACE_LOWER_STALL', '3'))  # con
 MAX_PLACE_LIFT_LOWER_CYCLES = int(os.environ.get('MAX_PLACE_LIFT_LOWER_CYCLES', '2'))  # lift↔lower thrash cap during place
 PLACE_XY_M = float(os.environ.get('PLACE_XY_M', '0.04'))  # held-object XY near place → allow force release
 PLACE_CLEARANCE_DEFAULT = float(os.environ.get('PLACE_CLEARANCE_DEFAULT', '0.05'))  # default place_clearance_m if Astra omits
-ASTRA_EFFORT = os.environ.get('ASTRA_EFFORT', 'xhigh')  # perceive/relook/slow/fallback Astra reasoning effort
+ASTRA_EFFORT = os.environ.get('ASTRA_EFFORT', 'xhigh')  # Astra perception/identity effort through Codex CLI
 SLOW_MIN_GAP_S = float(os.environ.get('SLOW_MIN_GAP_S', '5'))  # skip if last Astra call was more recent (unless fallback)
 STAGE_FAIL_N = int(os.environ.get('STAGE_FAIL_N', '3'))  # consecutive timeout/stall + unchanged gripper -> sync slow-think
 FAIL_RESULTS = frozenset({'timeout', 'stalled'})
@@ -77,31 +75,26 @@ validate(LIB)  # Reject invalid libraries before creating a simulator or making 
 ASK_ASTRA_NAMES = frozenset({'ask_astra', 'consult_astra'})
 GATE_JEV = os.environ.get('GATE_JEV', '1') != '0'  # spectator Jev gate (旁观者清); 0 disables
 GATE_JEV_COOLDOWN = int(os.environ.get('GATE_JEV_COOLDOWN', '3'))  # min decisions between spectator Jev calls
-CODING_AGENT_SLOW = os.environ.get('CODING_AGENT_SLOW', '0')  # 0=off|codex|dual — mid-episode coding-agent monitor pilot
-CODING_AGENT_PERCEIVE = os.environ.get('CODING_AGENT_PERCEIVE', '0')  # 0=off|codex — start+relook keypoints via coding agent
-EPISODE_START_PLAN = os.environ.get('EPISODE_START_PLAN', '')  # 0|codex|astra|auto — Great Wall start plan; empty=auto inherit
-# Reject unsupported backend values before creating a simulator or making model calls.
-CAS.backend_mode(CODING_AGENT_SLOW); CAS.perceive_backend_mode(CODING_AGENT_PERCEIVE); CAS.start_plan_backend_mode(EPISODE_START_PLAN)
 def _ensure_ask_astra_intents(lib):
-    """Inject ask_astra / consult_astra into any library so Jev can request Astra help."""
+    """Inject ask_astra / consult_astra into any library so Jev can request Codex planning help."""
     names = {i['name'] for i in lib.get('intents', [])}
     ask = {
         'id': 'ask_astra@v0', 'name': 'ask_astra', 'action': 'ask_astra', 'fingers': 'keep',
-        'definition': ('Request Astra slow-think help when stuck, identity unsure, approach looks wrong, '
+        'definition': ('Request Codex slow-think help when stuck, identity unsure, approach looks wrong, '
                        'or experience_brief suggests consulting vision. Not every step — budget-limited; '
                        'prefer after stall/timeout/empty close/identity doubt over blind close_gripper.'),
-        'refpoint': 'tcp', 'status': 'hypothesis', 'evidence': 'hybrid Astra help',
+        'refpoint': 'tcp', 'status': 'hypothesis', 'evidence': 'Codex planning help',
         'tilt_deg': '0', 'tilt_dir_deg': '0',
     }
     consult = dict(ask, id='consult_astra@v0', name='consult_astra', action='consult_astra',
-                   definition='Alias of ask_astra: consult Astra for an episode-only diagnosis and recovery plan (shares the slow-think budget).')
+                   definition='Alias of ask_astra: consult Codex for an episode-only diagnosis and recovery plan (shares the slow-think budget).')
     fin_i = next((i for i, it in enumerate(lib['intents']) if it['name'] == 'finish'), len(lib['intents']))
     if 'ask_astra' not in names:
         lib['intents'].insert(fin_i, ask); fin_i += 1; names.add('ask_astra')
     if 'consult_astra' not in names:
         lib['intents'].insert(fin_i, consult); names.add('consult_astra')
     tip = (' When stuck, identity unsure, or descent stalled/empty close, you may select ask_astra '
-           '(or consult_astra) to request Astra help — not every step; it shares the slow-think budget.')
+           '(or consult_astra) to request Codex planning help — not every step; it shares the slow-think budget.')
     instr = lib.get('intent_instructions', '') or ''
     if 'ask_astra' not in instr:
         lib['intent_instructions'] = instr + tip
@@ -193,28 +186,6 @@ def bp(uv, dep):
     u, v = int(np.clip(round(uv[0]), 2, S - 3)), int(np.clip(round(uv[1]), 2, S - 3))
     d = float(np.median(dep[v - 2:v + 3, u - 2:u + 3])); return CP + RM @ np.array([(uv[0] - S / 2) / F, -(uv[1] - S / 2) / F, -1.0]) * d
 
-PERC_PROMPT = f'''You are the perception module of a single Franka arm with a parallel gripper (top-down grasps).
-Task instruction (language goal): "{LANG}"
-Image: {S}x{S} px from a fixed front camera; robot base at the TOP of the image. Pixel v grows downward.
-IDENTITY FIRST (do this before locking any keypoints):
-- Read the language goal and NAME the object that must be moved and the place region, using only what the instruction says plus what you see (no memorized product look-up).
-- If several similar cans/bottles/boxes are visible, pick the one that best matches the language phrase; if you cannot tell, set matched_language_goal to null.
-- grasp_px / object_center_px MUST lie on THAT language-goal object only. place_px MUST lie on the language-goal place region only. Never lock points on a neighbour.
-Reply ONLY JSON with:
-{{"goal_object_named": short name of the language-goal object as you read it from the instruction + image (e.g. the can/bottle/box the instruction asks to move),
- "goal_object_where": one short phrase locating that object in THIS image (or "not visible"),
- "place_region_named": short name of the place region from the instruction + image,
- "place_region_where": one short phrase locating that place region (or "not visible"),
- "matched_language_goal": true if grasp/object_center keypoints are on the language-goal object AND place_px is on the language-goal place region; false if you locked a different object/region; null if unsure,
- "grasp_px":[u,v] (visible point a top-down gripper should pinch on the LANGUAGE-GOAL object: bowl RIM edge, bottle/can body, box centre),
- "grasp_yaw_deg": gripper rotation about vertical (0 = fingers close along image left-right; -90..90),
- "grasp_depth_m": how far below that visible point the fingertips should go (0.00-0.06),
- "object_center_px":[u,v] (centre of the LANGUAGE-GOAL object's top), "object_height_m": its height estimate, "object_width_m": its width across the gripper fingers,
- "place_px":[u,v] (visible point at the CENTRE of the LANGUAGE-GOAL target region: inside/bottom-centre of a basket/container, centre of a plate),
- "place_clearance_m": height above that point at which the held object's bottom should be released (0.00-0.10),
- "object_held_by_gripper": true/false (is the LANGUAGE-GOAL object currently between the closed fingers and off the table?),
- "confidence":0..1}}
-If matched_language_goal is false or null, still give your best keypoints on what you believe is the goal object, but set matched_language_goal honestly so a relook can be forced. Uncertain ≠ proceed: never claim a match when unsure — the policy will REFUSE to close until matched_language_goal is true.'''
 P = {'astra_cost': 0.0, 'astra_calls': 0, 'relook': 0, 'fb': 0, 'slow': 0, 'last_astra_wall': 0.0}
 ID_EVENTS = []  # identity checks at start / relook / fallback (policy-visible reflection evidence)
 def identity_fields(p):
@@ -239,65 +210,31 @@ def set_goal_id(confirmed, source, detail=None):
 def goal_id_confirmed():
     return GOAL_ID.get('confirmed') is True
 def perceive(context=None, phase=None):
-    """Keypoint perceive: Astra by default; CODING_AGENT_PERCEIVE=codex replaces start+relook.
-    Same JSON shape as Astra so `_commit_keypoints` is unchanged. On coding-agent failure → Astra fallback.
-    """
+    """Use Codex CLI to ask Astra for visual keypoints at start and on relook."""
+    import coding_agent_slow as CAS
+    from PIL import Image as _PILImage
     rgb, dep = rgbd()
-    prompt = PERC_PROMPT + (f'\nContext (current robot state / why you are asked again): {context}' if context else '')
     ph = phase or ('perceive' if not context else 'relook')
-    # Optional coding-agent perceive (episode-start + relook/escape share this hook)
-    try:
-        import coding_agent_slow as CAS
-        _pmode = CAS.perceive_backend_mode(
-            CODING_AGENT_PERCEIVE if 'CODING_AGENT_PERCEIVE' in globals()
-            else os.environ.get('CODING_AGENT_PERCEIVE', '0'))
-    except Exception as _ex_pmode:
-        _pmode = 'off'
-        try: log(t=T[0], coding_agent_perceive_mode_error=True, err=str(_ex_pmode)[:200])
-        except Exception: pass
-    if _pmode == 'codex':
-        img_paths = []
-        try:
-            from PIL import Image as _PILImage
-            still = os.path.join(ep_dir, f'perc_{ph}_{P["astra_calls"]}.jpg')
-            _PILImage.fromarray(rgb).save(still)
-            img_paths.append(still)
-            wr = obs.get('robot0_eye_in_hand_image')
-            if wr is not None:
-                wst = os.path.join(ep_dir, f'perc_{ph}_{P["astra_calls"]}_wrist.jpg')
-                _PILImage.fromarray(wr[::-1]).save(wst)
-                img_paths.append(wst)
-        except Exception as _ex_save:
-            try: log(t=T[0], coding_agent_perceive_save_error=True, err=str(_ex_save)[:200])
-            except Exception: pass
-        try:
-            parsed, rec = CAS.harness_call_perceive(
-                lang=LANG, phase=ph, image_paths=img_paths,
-                context=context, img_size=S, mode=_pmode,
-            )
-            P['astra_calls'] += 1  # count as a perception call for budgets/logs
-            P['last_astra_wall'] = time.time()
-            try:
-                log(t=T[0], coding_agent_perceive=True, mode=_pmode, phase=ph,
-                    wall_s=rec.get('wall_s'), validate_ok=rec.get('validate_ok'),
-                    matched=parsed.get('matched_language_goal'),
-                    grasp_px=parsed.get('grasp_px'), place_px=parsed.get('place_px'),
-                    confidence=parsed.get('confidence'))
-            except Exception:
-                pass
-            return parsed, rgb, dep
-        except Exception as ce:
-            try: log(t=T[0], coding_agent_perceive_error=True, mode=_pmode, phase=ph, err=str(ce)[:300])
-            except Exception: pass
-            # fall through to Astra
-    parsed, rec = AC.call(AC.to_jpeg(rgb), prompt, {**META, 'phase': ph}, effort=ASTRA_EFFORT)
+    frame = os.path.join(ep_dir, f'perc_{ph}_{P["astra_calls"]}.jpg')
+    _PILImage.fromarray(rgb).save(frame)
+    images = [frame]
+    wrist = obs.get('robot0_eye_in_hand_image')
+    if wrist is not None:
+        wrist_frame = os.path.join(ep_dir, f'perc_{ph}_{P["astra_calls"]}_wrist.jpg')
+        _PILImage.fromarray(wrist[::-1]).save(wrist_frame)
+        images.append(wrist_frame)
+    parsed, rec = CAS.harness_call_perceive(
+        lang=LANG, phase=ph, image_paths=images, context=context,
+        img_size=S, mode='codex', effort=ASTRA_EFFORT)
     P['astra_cost'] += rec['cost_usd']; P['astra_calls'] += 1; P['last_astra_wall'] = time.time()
+    log(t=T[0], perception=True, phase=ph, backend=rec.get('backend'),
+        model=rec.get('model'), effort=rec.get('effort'), wall_s=rec.get('wall_s'))
     return parsed, rgb, dep
 
 from PIL import Image
 PER = {}
 FB_LESSONS = []  # qualitative fallback reflections (no numbers) -> RSI evidence; quantitative patches stay episode-only
-# episode-only action patches from the early Astra fallback (NEVER written to the library); override library shape when set
+# episode-only action patches from the early perception-and-Codex recovery (NEVER written to the library); override library shape when set
 PATCH = {'grasp_dz_objh': 0.0, 'tilt_deg': None, 'tilt_dir_deg': None, 'yaw_deg': None, 'grasp_dxy_objw': [0.0, 0.0]}
 # Single grasp-target owner: one PER base + one PATCH offset layer. Never two competing goals.
 # source priority for the effective grasp: relook/keypoint refresh > slow_patch > episode_start
@@ -439,7 +376,7 @@ def set_perc(p, dep, held_now=False):
     PER['identity'] = identity_fields(p)
 
 def verify_grasp_identity(p, rgb, phase='perceive_start_verify'):
-    """Mark grasp_px on the image and ask Astra whether THAT marked body is the language-goal object.
+    """Mark grasp_px and ask Astra through Codex CLI whether THAT marked body is the language-goal object.
     Catches over-confident wrong locks (claimed match but pixel on a neighbour). No appearance hard-coding."""
     from PIL import ImageDraw as _ID
     im = Image.fromarray(rgb.copy()); d = _ID.Draw(im)
@@ -455,7 +392,12 @@ def verify_grasp_identity(p, rgb, phase='perceive_start_verify'):
               f' "is_language_goal_object": true if that marked body IS the object the instruction asks to move, false if it is a different object, null if unsure,\n'
               f' "language_goal_where_if_different": if false/null, where the true language-goal object is in this image (or "not visible"), else null,\n'
               f' "reason": one short sentence}}\nReply ONLY JSON.')
-    parsed, rec = AC.call(AC.to_jpeg(np.asarray(im)), prompt, {**META, 'phase': phase}, effort=ASTRA_EFFORT)
+    import coding_agent_slow as CAS
+    frame = os.path.join(ep_dir, f'identity_{phase}_{P["astra_calls"]}.jpg')
+    im.save(frame)
+    parsed, rec = CAS.call_identity_check(prompt, [frame], effort=ASTRA_EFFORT)
+    log(t=T[0], identity_verification=True, phase=phase, backend=rec.get('backend'),
+        model=rec.get('model'), effort=rec.get('effort'), wall_s=rec.get('wall_s'))
     P['astra_cost'] += rec['cost_usd']; P['astra_calls'] += 1; P['last_astra_wall'] = time.time()
     return parsed, np.asarray(im)
 
@@ -1074,8 +1016,6 @@ def _global_front_relook(reason):
             pass
         detail.update(matched=matched, phase=phase, tag=tag, identity=idf)
         return detail, dep
-    except AC.CapReached:
-        raise
     except Exception as ex:
         detail['error'] = str(ex)[:300]
         return detail, None
@@ -1089,7 +1029,7 @@ def _clear_stale_local_stall_state():
 
 def _local_deadend_global_relook_sync_slow(reason, ns=None):
     """Hard rule: abort local loop — retreat, global front relook, SYNCHRONOUS slow-think replan, then resume.
-    Uses existing _sync_slow (CODING_AGENT_SLOW / Astra hybrid). Jev does not choose the next intent until this returns."""
+    Uses the Codex _sync_slow path. Jev does not choose the next intent until this returns."""
     EP['local_deadend_n'] = int(EP.get('local_deadend_n', 0)) + 1
     counts = _local_deadend_counts()
     detail = {
@@ -1117,7 +1057,7 @@ def _local_deadend_global_relook_sync_slow(reason, ns=None):
     result = f'deadend:{reason}'
     crit = f'local_deadend_global_relook:{reason}'
     try:
-        # Enrich last markers so _slow_ctx sees the deadend
+        # Enrich last markers so _slow_ctx / mock see the deadend
         EP['last_stall_issue'] = None  # cleared; slow should replan from global stills
         sr, so = _sync_slow(intent, result, crit=crit)
         detail['slow_result'] = sr
@@ -1140,8 +1080,6 @@ def _local_deadend_global_relook_sync_slow(reason, ns=None):
                 _apply_stall_feedback(ns_fb, f'{crit}:fallback_raise', action='raise_redescend')
             except Exception as ex:
                 detail['fallback_raise_error'] = str(ex)[:200]
-    except AC.CapReached:
-        raise
     except NameError:
         # _sync_slow not yet bound (should not happen at runtime) — still force re-approach
         EP['force_next_intent'] = 'move_above_object'
@@ -1517,7 +1455,7 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
 
     elif action == 'clear_reapproach':
         # Blocked / unilateral hit: raise clear + XY recenter only. Do NOT swing yaw here —
-        # yaw changes only via change_approach_yaw (stall menu) or an explicit Astra plan step.
+        # yaw changes only via change_approach_yaw (stall menu) or an explicit Codex plan step.
         EP['clear_reapproach_n'] = int(EP.get('clear_reapproach_n', 0)) + 1
         detail['clear_reapproach_n'] = EP['clear_reapproach_n']
         _raise_tcp(3.0)
@@ -1536,7 +1474,7 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
         detail['grasp_dz_objh'] = PATCH['grasp_dz_objh']
         detail['yaw_preserved'] = _cmd_yaw_deg()
         EP['force_next_intent'] = 'move_above_object'
-        detail['note'] = 'raised_cleared_recenter_no_yaw; yaw only via change_approach_yaw or Astra plan'
+        detail['note'] = 'raised_cleared_recenter_no_yaw; yaw only via change_approach_yaw or Codex plan'
 
     elif action == 'push_aside':
         # Neighbour shove: identity-gated, open-finger lateral push, then force re-approach before close.
@@ -1592,8 +1530,6 @@ def _escape_look(reason):
         set_goal_id(matched, 'escape_look', idf)
         Image.fromarray(rgb).save(os.path.join(ep_dir, f'escape{EP["escape_looks"]}.jpg'))
         return 'escape_looked_matched' if matched else 'escape_looked_unmatched'
-    except AC.CapReached:
-        raise
     except Exception as e:
         return f'escape_look_error:{e}'
 
@@ -1691,7 +1627,6 @@ def do_relook(reason):
         set_goal_id(matched, 'relook', idf)
         Image.fromarray(rgb).save(os.path.join(ep_dir, f'relook{P["relook"]}.jpg'))
         return 'relooked_matched' if matched else 'relooked_unmatched'
-    except AC.CapReached: raise
     except Exception as e: return 'relook_error'
 
 def execute(name, ns):
@@ -1766,25 +1701,6 @@ def execute(name, ns):
         _clear_reapproach_if_aligned('reached')
     return r
 
-PATCH_PROMPT = """
-Task instruction (language goal): "{LANG}".
-The episode is stuck. The image shows LEFT: the fixed front camera (pixel coordinates refer to this left {S}x{S} half) and RIGHT: the wrist camera
-(looking down between the fingers; fingers at its bottom edge). First REFLECT, then propose an EPISODE-ONLY plan (it applies to this episode only).
-Add these keys to the same JSON (keypoints must be pixels in the LEFT image):
- "goal_object_where": one short phrase locating the LANGUAGE-GOAL object in the LEFT and RIGHT images (or "not visible"),
- "held_or_between_fingers": one short phrase naming what is currently between the fingers / being carried (or "nothing"),
- "is_goal_object": true if that held/between-fingers object IS the language-goal object, false if it is a different object, null if unsure,
- "failure_class": one of "wrong_object" | "blocked_by_neighbour" | "object_pushed_by_descent" | "tipped_by_near_approach" | "grasp_point_off_centre" | "release_too_high" | "other",
- "diagnosis": one short sentence on why it failed, citing the images and the close/contact history,
- "lesson": one short GENERAL sentence a robot could reuse in other scenes (qualitative; NO numbers, units or object names),
- "plan": ordered list of steps, each one of:
-   {{"step":"relook"}}  (your keypoints above are taken as the refreshed object/place estimates; only when identity is wrong/unsure),
-   {{"step":"raise_redescend"}}, {{"step":"lateral_recenter"}}, {{"step":"change_approach_yaw"}}, {{"step":"confirm_contact"}}, {{"step":"clear_reapproach"}},
-   {{"step":"adjust","grasp_dz_objh":-0.5..0.5 (fingertip target offset in object heights, negative=lower),"tilt_deg":0..30,"tilt_dir_deg":image-plane direction (0=image right, 90=toward camera),"yaw_deg":-90..90}},
-   {{"step":"push_aside","blocker_px":[u,v] (blocking object in LEFT image),"direction":"away_from_target" | "toward_image_left" | "toward_image_right" | "toward_camera" | "away_from_camera","distance_objw":0.5..2.0 (push length in target-object widths)}}
-If is_goal_object is false or null (unsure), you MUST set failure_class to "wrong_object" and lead the plan with {{"step":"relook"}} that targets the LANGUAGE-GOAL object (refresh grasp_px / object_center_px to that object); do NOT continue using the current grasp point. Uncertain ≠ proceed — never recommend closing on an unconfirmed object.
-When identity IS confirmed but descent stalled / empty close / blocked neighbour, prefer raise_redescend, lateral_recenter, change_approach_yaw, confirm_contact, clear_reapproach, or push_aside — not relook-only null plans.
-Base everything on the images and Context (opening right after a close near zero = fingers closed on nothing; contact during descent before closing = something was hit; a tall bottle/can that has leaned or fallen after the gripper came near without closing = tipped_by_near_approach — next plan should clear/reapproach from a clear height above the body and descend vertically)."""
 def push_aside(st, dep):
     """Episode-only neighbour shove. Identity-gated; prefers OPEN fingers; forces re-approach before close.
     Direction from blocker_px relative to target/camera — no fixed scene yaw / object names."""
@@ -1796,41 +1712,7 @@ def push_aside(st, dep):
 
 
 
-SLOW_PROMPT = """
-Task instruction (language goal): "{LANG}".
-Light mid-episode check (NOT a full replan). LEFT = fixed front camera ({S}x{S}; pixel coords refer to LEFT), RIGHT = wrist looking between the fingers.
-Decide whether something has gone wrong NOW and whether to intervene THIS EPISODE ONLY.
-Do NOT hard-code product looks; use ONLY the language goal + what you see.
-Reply ONLY JSON:
-{{"goal_object_where": short phrase locating the LANGUAGE-GOAL object in LEFT/RIGHT (or "not visible"),
- "held_or_between_fingers": what is between the fingers / being carried (or "nothing"),
- "is_goal_object": true if held/between-fingers IS the language-goal object, false if a different object, null if nothing held or unsure,
- "issue": one of "ok" | "wrong_object" | "tip_push" | "empty_grasp" | "place_miss" | "blocked_by_neighbour" | "object_pushed_by_descent" | "other",
- "intervene": true only if issue is not "ok" AND an episode-only fix is needed now,
- "diagnosis": one short sentence citing the images,
- "lesson": one short GENERAL reusable sentence (qualitative; NO numbers/units/object names) or "",
- "plan": if intervene, ordered steps (else []): each one of
-   {{"step":"relook"}}  (your keypoints below refresh object/place; REQUIRED if wrong_object; NOT for confirmed-identity stall),
-   {{"step":"raise_redescend"}}  (lift clear then re-approach shallower — for stalled descent / empty close),
-   {{"step":"lateral_recenter"}}  (shift approach toward object centre in-plane, then re-approach),
-   {{"step":"change_approach_yaw"}}  (relative vertical-axis orientation change, then re-approach),
-   {{"step":"confirm_contact"}}  (require bilateral finger contact before treating grasp as secure / before lift),
-   {{"step":"clear_reapproach"}}  (raise clear of neighbour, lateral bias away from contact, re-approach),
-   {{"step":"adjust","grasp_dz_objh":-0.5..0.5,"tilt_deg":0..30,"tilt_dir_deg":0=image right 90=toward camera,"yaw_deg":-90..90}},
-   {{"step":"push_aside","blocker_px":[u,v],"direction":"away_from_target"|"toward_image_left"|"toward_image_right"|"toward_camera"|"away_from_camera","distance_objw":0.5..2.0}}
-Plus the usual perception keypoints on the LEFT image when intervene is true (grasp_px, object_center_px, place_px, object_height_m, object_width_m, grasp_yaw_deg, grasp_depth_m, place_clearance_m, object_held_by_gripper, matched_language_goal).
-Rules: if is_goal_object is false, OR null while the gripper is closed / something appears between the fingers (unsure what is held), intervene MUST be true and plan MUST lead with relook targeting the language-goal object. If matched_language_goal is false or null, also intervene with relook. Uncertain ≠ proceed — do not allow further closes on an unconfirmed target; set matched_language_goal honestly. Before any close, is_goal_object=null meaning "nothing held yet" is OK only when matched_language_goal is already true.
-tip_push = tall object leaned/moved after near approach or contact during descent before a stable close.
-empty_grasp = closed on nothing (opening near zero, no useful contact) or closed but language-goal object still on table.
-blocked_by_neighbour = path or grasp blocked by a neighbouring object (side collision / hemmed in) while target identity may still be correct.
-object_pushed_by_descent = descent or near-approach displaced / tipped the target or a neighbour before a stable bilateral close.
-place_miss = released / carrying over the wrong place region for the language goal, or clearly off the place surface.
-Prefer intervene=false when progressing normally AND matched_language_goal is true (goal identity already confirmed).
-MULTI-ACTION STALL FEEDBACK (when matched_language_goal is already true): if Context shows stalled/timeout descent, empty close, or no bilateral contact near the grasp, you MUST intervene with one or more of raise_redescend / lateral_recenter / change_approach_yaw / confirm_contact / clear_reapproach / push_aside — NOT relook-only and NOT an empty/null plan. Choose from observations (unilateral contact → clear_reapproach or push_aside; empty close → raise_redescend or lateral_recenter; stalled with no contact → raise_redescend or change_approach_yaw; closed without both fingers touching → confirm_contact). Relative yaw only — never invent a fixed scene angle.
-If path looks blocked by a neighbour, prefer push_aside or clear_reapproach over another relook.
-LOCAL DEADEND / GLOBAL RELOOK: when Context marks local_deadend_global_relook or push_aside is already exhausted, the arm retreated for a fresh FRONT view — do NOT loop push_aside/move_above; replan from the global stills (raise_redescend / lateral_recenter / change_approach_yaw / relook / adjust)."""
-
-# Hybrid slow-think: async watch most of the time; SYNC pause only at critical points.
+# Codex slow-think: async watch most of the time; SYNC pause at critical points.
 # Async results older than 1 completed intent are discarded. Never watches mid-episode video.
 # Per-job ownership: each async request gets a unique job_id + private result_box.
 # Abandoned workers may finish later but MUST NOT write into a newer job's slot (B01).
@@ -1854,7 +1736,7 @@ def _combo_rgb():
     return both, rgb, dep
 
 def _apply_episode_plan(p, dep, source='slow'):
-    """Apply episode-only plan steps from Astra (fallback or slow-think).
+    """Apply episode-only plan steps from Codex.
     Single shared goal: keypoint refresh overwrites PER+clears position PATCH; approach yaw/tilt preserved unless new yaw explicit; adjust/stall mutates PATCH only.
     On stall with identity confirmed: empty relook-only is forbidden — must update the shared target."""
     def f(d_, k, lo, hi, d):
@@ -1975,13 +1857,11 @@ def _apply_episode_plan(p, dep, source='slow'):
 
 def _run_episode_start_plan():
     """Great Wall: predictive global plan after start identity, before first approach.
-    Uses CODING_AGENT / EPISODE_START_PLAN; applies via `_apply_episode_plan`; persists start_plan.json.
+    Uses Codex; applies via `_apply_episode_plan`; persists start_plan.json.
     Mid-episode slow-think must only fine-tune this prior, not replan from zero."""
     import coding_agent_slow as CAS
-    mode = CAS.start_plan_backend_mode(EPISODE_START_PLAN if 'EPISODE_START_PLAN' in globals() else os.environ.get('EPISODE_START_PLAN', ''))
+    mode = 'codex'
     out = {'mode': mode, 'applied': False, 'plan_done': [], 'error': None}
-    if mode == 'off':
-        return out
     try:
         brief = JX.build_jev_experience_brief(LIB, facts={}, ns={}, uses=EP.get('uses') or {}, dsl=dsl)
     except Exception:
@@ -2053,42 +1933,9 @@ def _run_episode_start_plan():
             images.append(fp)
     parsed, rec = None, {}
     try:
-        if mode == 'astra':
-            # Astra path: same start-plan schema via coding_agent prompt text + AC.call
-            prompt = CAS.build_start_prompt(CAS.pack_start_context(
-                lang=LANG, experience_brief=brief, start_hints=start_hints, keyframe_paths=images))
-            rgb, dep = rgbd()
-            wr = obs.get('robot0_eye_in_hand_image')
-            both = np.concatenate([rgb, np.asarray(Image.fromarray(wr[::-1]).resize((S, S)))], 1) if wr is not None else rgb
-            parsed, rec = AC.call(AC.to_jpeg(both), prompt, {**META, 'phase': 'episode_start_plan'}, effort=ASTRA_EFFORT)
-            P['astra_cost'] += rec.get('cost_usd', 0); P['astra_calls'] += 1; P['last_astra_wall'] = time.time()
-            ok, errs, parsed = CAS.validate_start_plan(parsed, lang=LANG)
-            rec = dict(rec or {}); rec['validate_ok'] = ok; rec['validate_errs'] = errs; rec['backend'] = 'astra_start'
-            if not ok:
-                raise ValueError(f'astra_start_plan_invalid:{errs}')
-        else:
-            try:
-                parsed, rec = CAS.harness_call_start_plan(
-                    lang=LANG, experience_brief=brief, start_hints=start_hints,
-                    ep_dir=ep_dir, image_paths=images, mode=mode)
-            except Exception as ce:
-                # Prefer Codex; fall back to Astra once if Codex hard-fails.
-                if mode == 'codex' and FALLBACK:
-                    out['codex_error'] = str(ce)[:300]
-                    prompt = CAS.build_start_prompt(CAS.pack_start_context(
-                        lang=LANG, experience_brief=brief, start_hints=start_hints, keyframe_paths=images))
-                    rgb, dep = rgbd()
-                    wr = obs.get('robot0_eye_in_hand_image')
-                    both = np.concatenate([rgb, np.asarray(Image.fromarray(wr[::-1]).resize((S, S)))], 1) if wr is not None else rgb
-                    parsed, rec = AC.call(AC.to_jpeg(both), prompt, {**META, 'phase': 'episode_start_plan_fb'}, effort=ASTRA_EFFORT)
-                    P['astra_cost'] += rec.get('cost_usd', 0); P['astra_calls'] += 1; P['last_astra_wall'] = time.time()
-                    ok, errs, parsed = CAS.validate_start_plan(parsed, lang=LANG)
-                    rec = dict(rec or {}); rec['validate_ok'] = ok; rec['validate_errs'] = errs
-                    rec['backend'] = 'astra_start_fallback'; rec['codex_error'] = out['codex_error']
-                    if not ok:
-                        raise ValueError(f'astra_start_fallback_invalid:{errs}')
-                else:
-                    raise
+        parsed, rec = CAS.harness_call_start_plan(
+            lang=LANG, experience_brief=brief, start_hints=start_hints,
+            ep_dir=ep_dir, image_paths=images, mode='codex')
         proposed_plan = parsed
         if identity_fields(parsed)['matched_language_goal'] is False:
             set_goal_id(False, 'episode_start_plan_rejected', identity_fields(parsed))
@@ -2128,7 +1975,8 @@ def _run_episode_start_plan():
     except Exception as ex:
         out['error'] = str(ex)[:400]
         try:
-            json.dump(out, open(os.path.join(ep_dir, 'start_plan.json'), 'w'), indent=1, default=str)
+            with open(os.path.join(ep_dir, 'start_plan.json'), 'w') as plan_file:
+                json.dump(out, plan_file, indent=1, default=str)
             log(t=T[0], episode_start_plan_error=True, mode=mode, err=out['error'])
         except Exception:
             pass
@@ -2200,12 +2048,8 @@ def _slow_ctx(intent, result):
                            'prefer raise_redescend / lateral_recenter / change_approach_yaw / relook from the GLOBAL front view.'
                        )}, default=float)
 
-def _slow_prompt(ctx):
-    return (PERC_PROMPT + SLOW_PROMPT.replace('{S}', str(S)).replace('{LANG}', LANG) +
-            f'\nContext: {ctx}\nIf intervene is false, you may omit keypoints and set plan=[].')
-
 def _finish_slow(parsed, rec, dep, both, intent, result, mode, crit, snap_dec):
-    """Apply a finished Astra slow-think reply on the main thread (env-safe)."""
+    """Apply a finished Codex slow-think reply on the main thread (env-safe)."""
     P['astra_cost'] += rec['cost_usd']; P['astra_calls'] += 1; P['last_astra_wall'] = time.time()
     issue = str(parsed.get('issue') or 'ok')
     _igo = parsed.get('is_goal_object')
@@ -2213,7 +2057,7 @@ def _finish_slow(parsed, rec, dep, both, intent, result, mode, crit, snap_dec):
     elif _igo is False or str(_igo).lower() == 'false': _igo_n = False
     else: _igo_n = None
     _mlg = identity_fields(parsed)['matched_language_goal'] if 'matched_language_goal' in parsed else None
-    # Held-object check only meaningful after a close (or when Astra already flags wrong_object).
+    # Held-object check only meaningful after a close (or when Codex flags wrong_object).
     # Before close, is_goal_object=null ("nothing held") must NOT clear the grasp-target GOAL_ID gate.
     stall_issue = issue in ('empty_grasp', 'tip_push')
     held_id_bad = (_igo_n is False) or (issue == 'wrong_object') or (_igo_n is None and EP['closed'] and not stall_issue and _mlg is not True)
@@ -2269,49 +2113,31 @@ def _finish_slow(parsed, rec, dep, both, intent, result, mode, crit, snap_dec):
 
 def _prepare_slow_snapshot(ctx, crit, phase, both, image_tag):
     import coding_agent_slow as CAS
-    mode = CAS.backend_mode(CODING_AGENT_SLOW)
-    snapshot = {'mode': mode, 't': T[0], 'effort': ASTRA_EFFORT, 'coding_context': None}
-    if mode in ('codex', 'dual'):
-        brief = JX.build_jev_experience_brief(LIB, facts={}, ns={}, uses=EP.get('uses') or {}, dsl=dsl)
-        # A unique file belongs to this request. No worker scans changing episode files.
-        frame = os.path.join(ep_dir, f'slow_input_{image_tag}.jpg')
-        Image.fromarray(both).save(frame)
-        snapshot['coding_context'] = CAS.prepare_slow_context(
-            lang=LANG, trigger=str(crit or phase), slow_ctx_json=ctx,
-            experience_brief=brief, patch=PATCH,
-            goal_id={'confirmed': goal_id_confirmed(), 'target': GOAL_TARGET},
-            ep_dir=ep_dir, keyframe_paths=[frame])
-    return snapshot
+    brief = JX.build_jev_experience_brief(LIB, facts={}, ns={}, uses=EP.get('uses') or {}, dsl=dsl)
+    # Unique image and detached policy context belong to this request.
+    frame = os.path.join(ep_dir, f'slow_input_{image_tag}.jpg')
+    Image.fromarray(both).save(frame)
+    context = CAS.prepare_slow_context(
+        lang=LANG, trigger=str(crit or phase), slow_ctx_json=ctx,
+        experience_brief=brief, patch=PATCH,
+        goal_id={'confirmed': goal_id_confirmed(), 'target': GOAL_TARGET},
+        ep_dir=ep_dir, keyframe_paths=[frame])
+    return {'t': T[0], 'coding_context': context}
 
 
-def _slow_worker(jpeg, prompt, meta, job_id, result_box, snapshot):
-    """Use captured inputs only; publish results and log events into this job's private box."""
+def _slow_worker(job_id, result_box, snapshot):
+    """Codex only: publish results and log events into this job's private box."""
     events = result_box.setdefault('events', [])
-    mode = snapshot['mode']
     try:
         import coding_agent_slow as CAS
-        coding_rec = coding_parsed = None
-        if mode in ('codex', 'dual'):
-            try:
-                coding_parsed, coding_rec = CAS.call_monitor(snapshot['coding_context'], mode=mode)
-                events.append(dict(t=snapshot['t'], coding_agent_slow=True, mode=mode, job_id=job_id,
-                    issue=coding_parsed.get('issue'), intervene=coding_parsed.get('intervene'),
-                    plan=coding_parsed.get('plan'), backend=coding_rec.get('backend')))
-            except Exception as ce:
-                coding_rec = {'backend': mode, 'err': str(ce)}
-                events.append(dict(t=snapshot['t'], coding_agent_slow_error=True,
-                                   mode=mode, job_id=job_id, err=str(ce)[:300]))
-                if mode == 'codex':
-                    raise
-        if mode == 'codex' and coding_parsed is not None:
-            parsed, rec = coding_parsed, coding_rec
-        else:
-            parsed, rec = AC.call(jpeg, prompt, meta, effort=snapshot['effort'])
-            rec = dict(rec)
-            if coding_rec is not None:
-                rec['coding_dual'] = {'proposal': coding_parsed, 'rec': coding_rec}
+        parsed, rec = CAS.call_monitor(snapshot['coding_context'], mode='codex')
+        events.append(dict(t=snapshot['t'], coding_agent_slow=True, mode='codex', job_id=job_id,
+            issue=parsed.get('issue'), intervene=parsed.get('intervene'),
+            plan=parsed.get('plan'), backend=rec.get('backend')))
         result_box['parsed'], result_box['rec'] = parsed, rec
     except Exception as e:
+        events.append(dict(t=snapshot['t'], coding_agent_slow_error=True,
+                           mode='codex', job_id=job_id, err=str(e)[:300]))
         result_box['err'] = e
     finally:
         result_box['done'] = True
@@ -2407,7 +2233,6 @@ def _poll_async_slow(wait=False, timeout=None):
     parsed, rec = box.get('parsed'), box.get('rec')
     if err is not None:
         _clear_slow_job()
-        if isinstance(err, AC.CapReached): raise err
         return f'async_error:{err}', None
     if stale > SLOW_STALE_INTENTS:
         _account_slow_rec(rec)
@@ -2429,22 +2254,19 @@ def _launch_async_slow(intent, result, crit=None, replace=False):
         return 'rate_limited', None
     if P['slow'] >= MAX_SLOW: return 'slow_cap', None
     both, rgb, dep = _combo_rgb()
-    jpeg = AC.to_jpeg(both)
     ctx = _slow_ctx(intent, result)
-    prompt = _slow_prompt(ctx)
-    meta = {**META, 'phase': 'slow_think_async'}
     job_id = _next_slow_job_id()
     result_box = _new_slow_result_box(job_id)
-    snapshot = _prepare_slow_snapshot(ctx, crit, meta['phase'], both, f'async_{job_id}')
+    snapshot = _prepare_slow_snapshot(ctx, crit, 'slow_think_async', both, f'async_{job_id}')
     SLOW_JOB.update(snap_dec=dec, dep=dep.copy(), both=both.copy(), intent=intent, result=result,
                     mode='async', crit=crit, out=None, err=None, rec=None, parsed=None,
                     job_id=job_id, result_box=result_box)
-    th = threading.Thread(target=_slow_worker, args=(jpeg, prompt, meta, job_id, result_box, snapshot), daemon=True)
+    th = threading.Thread(target=_slow_worker, args=(job_id, result_box, snapshot), daemon=True)
     SLOW_JOB['thread'] = th; th.start()
     return 'async_launched', {'snap_dec': dec, 'intent': intent, 'crit': crit, 'job_id': job_id}
 
 def _sync_slow(intent, result, crit):
-    """Block: fresh stills + Astra (or coding-agent monitor), then apply before next Jev intent."""
+    """Block on Codex using fresh stills, then apply before the next Jev intent."""
     # Abandon in-flight async without applying (critical needs a fresh post-event view).
     # Invalidate job_id so a late worker cannot overwrite / be polled as current (B01).
     if SLOW_JOB.get('thread') is not None or SLOW_JOB.get('job_id') is not None:
@@ -2461,39 +2283,21 @@ def _sync_slow(intent, result, crit):
     if P['slow'] >= MAX_SLOW: return 'slow_cap', None
     both, rgb, dep = _combo_rgb()
     ctx = _slow_ctx(intent, result)
-    prompt = _slow_prompt(ctx) + f'\nThis is a SYNC critical check ({crit}); be decisive.'
     try:
         import coding_agent_slow as CAS
-        mode = CAS.backend_mode(CODING_AGENT_SLOW)
-        coding_parsed = coding_rec = None
-        if mode in ('codex', 'dual'):
-            try:
-                snapshot = _prepare_slow_snapshot(ctx, crit, 'sync', both, f'sync_{_next_slow_job_id()}')
-                coding_parsed, coding_rec = CAS.call_monitor(snapshot['coding_context'], mode=mode)
-                log(t=T[0], coding_agent_slow=True, mode=mode, sync=True, crit=crit,
-                    issue=(coding_parsed or {}).get('issue'),
-                    intervene=(coding_parsed or {}).get('intervene'),
-                    plan=(coding_parsed or {}).get('plan'),
-                    backend=(coding_rec or {}).get('backend'))
-            except Exception as ce:
-                log(t=T[0], coding_agent_slow_error=True, mode=mode, sync=True, err=str(ce)[:300])
-                if mode == 'codex':
-                    return f'sync_error:coding_agent:{ce}', None
-        if mode == 'codex' and coding_parsed is not None:
-            return _finish_slow(coding_parsed, coding_rec or {'cost_usd': 0.0}, dep, both, intent, result, f'sync_cas_{mode}', crit, dec)
-        p, rec = AC.call(AC.to_jpeg(both), prompt, {**META, 'phase': 'slow_think_sync'}, effort=ASTRA_EFFORT)
-        if coding_parsed is not None and isinstance(rec, dict):
-            rec = dict(rec)
-            rec['coding_dual'] = {
-                'issue': coding_parsed.get('issue'), 'intervene': coding_parsed.get('intervene'),
-                'plan': coding_parsed.get('plan'), 'backend': (coding_rec or {}).get('backend'),
-            }
-        return _finish_slow(p, rec, dep, both, intent, result, 'sync', crit, dec)
-    except AC.CapReached: raise
-    except Exception as e: return f'sync_error:{e}', None
+        snapshot = _prepare_slow_snapshot(ctx, crit, 'sync', both, f'sync_{_next_slow_job_id()}')
+        parsed, rec = CAS.call_monitor(snapshot['coding_context'], mode='codex')
+        log(t=T[0], coding_agent_slow=True, mode='codex', sync=True, crit=crit,
+            issue=parsed.get('issue'), intervene=parsed.get('intervene'),
+            plan=parsed.get('plan'), backend=rec.get('backend'))
+        return _finish_slow(parsed, rec, dep, both, intent, result, 'sync_codex', crit, dec)
+    except Exception as e:
+        log(t=T[0], coding_agent_slow_error=True, mode='codex', sync=True, err=str(e)[:300])
+        return f'sync_error:coding_agent:{e}', None
+
 
 def _consume_help_budget(reason):
-    """Shared MAX_SLOW slot for ask_astra / hard-force consults (even if Astra says intervene=false)."""
+    """Shared MAX_SLOW slot for ask_astra / hard-force consults (even if Codex says intervene=false)."""
     if P['slow'] < MAX_SLOW:
         P['slow'] += 1
         log(t=T[0], astra_help_budget=True, reason=reason, slow_used=P['slow'], max_slow=MAX_SLOW)
@@ -2501,7 +2305,7 @@ def _consume_help_budget(reason):
     return False
 
 def do_ask_astra(reason):
-    """Jev-chosen Astra consult: sync slow-think / same plan path as critical fallback. Shares MAX_SLOW."""
+    """Jev-chosen Codex consult (existing ask_astra intent name): sync slow-think / same plan path as critical fallback. Shares MAX_SLOW."""
     if not FALLBACK:
         return 'ask_astra_disabled'
     if P['slow'] >= MAX_SLOW:
@@ -2530,7 +2334,7 @@ def do_ask_astra(reason):
     return f'ask_astra:{sr}'
 
 def _hard_astra_trigger(intent, result):
-    """Hard rules: stall/timeout or identity-unstable → force sync Astra (shares MAX_SLOW)."""
+    """Hard rules: stall/timeout or identity-unstable → force sync Codex (shares MAX_SLOW)."""
     if not FALLBACK or P['slow'] >= MAX_SLOW:
         return None
     if intent in ASK_ASTRA_NAMES:
@@ -2606,7 +2410,7 @@ def _spectator_jev_state(intent, result, signals, ns, facts):
         'note': (
             'You are a separate spectator (旁观者清), NOT the acting policy. '
             'Acting Jev can be 当局者迷 — stuck repeating a bad plan. '
-            'Decide whether to hand control to Astra slow-think for a fresh look.'
+            'Decide whether to hand control to Codex slow-think using the current visual evidence.'
         ),
         'language_goal': LANG,
         'just_finished_intent': intent,
@@ -2634,7 +2438,7 @@ def _spectator_jev_state(intent, result, signals, ns, facts):
 
 _SPECTATOR_CRITERIA = {
     'defer_to_astra': (
-        'Yes — bounce to Astra: acting looks stuck, identity doubtful, oscillating, '
+        'Yes — request Codex planning: acting looks stuck, identity doubtful, oscillating, '
         'or experience_brief suggests a vision consult would help. Shares slow-think budget.'
     ),
     'continue_acting': (
@@ -2666,7 +2470,7 @@ def _spectator_jev_should_ask_astra(intent, result, signals, ns, facts, dec):
         return False, detail
 
 def do_spectator_astra(intent, result, reason):
-    """Spectator said yes → sync Astra path (same budget as ask_astra / hard force)."""
+    """Spectator said yes → sync Codex path (same budget as ask_astra / hard force)."""
     if not FALLBACK:
         return 'spectator_disabled', None
     if P['slow'] >= MAX_SLOW:
@@ -2688,7 +2492,7 @@ def do_spectator_astra(intent, result, reason):
 
 def do_slow_think(intent, result, force=False):
     """Hybrid slow-think after a Jev intent.
-    - Most intents: fire async Astra watch on stills; discard if >1 intent stale when ready.
+    - Most intents: fire async Codex watch on stills; discard if >1 intent stale when ready.
     - Critical (after close / release / no-progress / stage-fail+grip-unchanged): SYNC pause, look, maybe intervene.
     - Hard force (stall / identity-unstable), acting ask_astra, and spectator-gate defer also SYNC; all share MAX_SLOW.
     Mid-episode never uses video; end-of-episode lesson update still watches the full mp4.
@@ -2744,91 +2548,18 @@ def _should_open_on_intervention(*, igo_n, issue=None, failure_class=None):
 
 
 def do_fallback(trig):
+    """Refresh visual evidence through Astra, then ask Codex for the recovery plan."""
     if P['relook'] >= MAX_RELOOK:
         esc = _escape_identity_deadlock(f'fallback_relook_exhausted:{trig}')
         return f'escape_after_budget:{esc}', {**PATCH, 'escape': True, 'trigger': trig, 'escape_result': esc}
-    P['relook'] += 1; ns, _ = namespace()
-    ctx = json.dumps({'reason': f'early fallback: {trig}', 'recent_intents': EP['hist'][-8:], 'times_closed': EP['n_close'],
-                      'close_attempts': EP['closes'][-4:], 'current_patch': PATCH, 'gripper_closed_command': ns['closed_cmd'],
-                      'fingers_opening_m': round(ns['opening'], 4), 'both_fingers_contact': ns['contact'],
-                      'gripper_xyz_m': [round(float(x), 3) for x in ns['tcp']], 'object_height_estimate_m': round(PER['obj_h'], 3)}, default=float)
-    try:
-        rgb, dep = rgbd(); wr = obs.get('robot0_eye_in_hand_image')
-        both = np.concatenate([rgb, np.asarray(Image.fromarray(wr[::-1]).resize((S, S)))], 1) if wr is not None else rgb
-        p, rec = AC.call(AC.to_jpeg(both), PERC_PROMPT + PATCH_PROMPT.replace('{S}', str(S)).replace('{LANG}', LANG) + f'\nContext: {ctx}', {**META, 'phase': 'fallback_reflect'}, effort=ASTRA_EFFORT)
-        P['astra_cost'] += rec['cost_usd']; P['astra_calls'] += 1; P['last_astra_wall'] = time.time()
-        _commit_keypoints(p, dep, 'fallback_keypoints', held_now=bool(p.get('object_held_by_gripper')) and EP['closed'])
-        def f(d_, k, lo, hi, d):
-            try: return float(np.clip(float(d_[k]), lo, hi))
-            except Exception: return d
-        les = str(p.get('lesson') or '').strip()
-        if les and not any(ch.isdigit() for ch in les): FB_LESSONS.append({'failure_class': p.get('failure_class'), 'diagnosis': re.sub(r'\d', '#', str(p.get('diagnosis', ''))), 'lesson': les})
-        igo = p.get('is_goal_object')
-        if igo is True or str(igo).lower() == 'true': igo_n = True
-        elif igo is False or str(igo).lower() == 'false': igo_n = False
-        else: igo_n = None
-        if str(p.get('failure_class')) == 'wrong_object' or igo_n is not True:
-            p['failure_class'] = 'wrong_object'; p['plan'] = [{'step': 'relook'}] + [st for st in (p.get('plan') or []) if st.get('step') != 'adjust']
-            _reset_patch(reason='fallback_igo_bad')
-            set_goal_id(False, 'fallback_igo', {'is_goal_object': igo_n, 'failure_class': p.get('failure_class')})
-        else:
-            set_goal_id(True, 'fallback_igo', {'is_goal_object': True})
-            _fc = str(p.get('failure_class') or '')
-            if _fc in NEIGHBOUR_STALL_ISSUES or _fc in ('empty_grasp', 'tip_push', 'blocked_by_neighbour', 'object_pushed_by_descent'):
-                EP['last_stall_issue'] = _fc
-        if _should_open_on_intervention(igo_n=igo_n, failure_class=p.get('failure_class')):
-            EP['closed'] = False; grip(-1, 15); EP['released'] = True
-        done_steps = []; target_updated = True  # keypoints just committed
-        stall_steps = {'raise_redescend', 'lateral_recenter', 'change_approach_yaw', 'confirm_contact', 'clear_reapproach'}
-        id_ok = goal_id_confirmed(); last = str(EP.get('last_result') or '')
-        stallish = last in ('stalled', 'timeout') or str(p.get('failure_class') or '') in ('empty_grasp', 'tip_push', 'blocked_by_neighbour', 'object_pushed_by_descent')
-        has_kp = True
-        for st in (p.get('plan') or [])[:3]:
-            k = st.get('step')
-            if k == 'adjust':
-                PATCH.update(grasp_dz_objh=f(st, 'grasp_dz_objh', -.5, .5, PATCH['grasp_dz_objh']), tilt_deg=f(st, 'tilt_deg', 0, 30, PATCH['tilt_deg']),
-                             yaw_deg=f(st, 'yaw_deg', -90, 90, PATCH['yaw_deg']))
-                td = f(st, 'tilt_dir_deg', -180, 180, None)
-                if td is not None:
-                    th = np.deg2rad(td); dw = RM @ np.array([np.cos(th), -np.sin(th), 0]); PATCH['tilt_dir_deg'] = float(np.degrees(np.arctan2(dw[1], dw[0])))
-                _note_patch_mutation('fallback:adjust', dict(st))
-                done_steps.append('adjust'); target_updated = True
-            elif k in stall_steps:
-                try:
-                    ns_fb, _ = namespace()
-                    det = _apply_stall_feedback(ns_fb, f'fallback:{k}', action=k)
-                    done_steps.append(f'{k}:{det.get("action")}'); target_updated = True
-                except Exception as ex:
-                    done_steps.append(f'{k}_error:{ex}')
-            elif k == 'push_aside':
-                try:
-                    ns_fb, _ = namespace()
-                    det = _apply_stall_feedback(ns_fb, 'fallback:push_aside', action='push_aside', plan_step=st, dep=dep)
-                    done_steps.append(f"push_aside:{det.get('action')}:{det.get('error') or ('ok' if det.get('pushed') else 'noop')}")
-                    target_updated = True
-                except Exception as ex:
-                    done_steps.append(f'push_aside_error:{ex}')
-            elif k == 'relook':
-                if id_ok and stallish and not has_kp:
-                    done_steps.append('relook_skipped_empty_confirmed_stall')
-                else:
-                    done_steps.append('relook')
-        if id_ok and stallish and not target_updated:
-            try:
-                ns_fb, _ = namespace()
-                det = _apply_stall_feedback(ns_fb, 'fallback:forced_target_update')
-                done_steps.append(f'forced_stall_feedback:{det.get("action")}')
-            except Exception as ex:
-                done_steps.append(f'forced_stall_feedback_error:{ex}')
-        Image.fromarray(both).save(os.path.join(ep_dir, f'fb{P["fb"]}.jpg'))
-        # Do not unconditionally reopen here — release already decided above from identity/empty (keep verified hold).
-        ID_EVENTS.append({'where': 'fallback', 'trigger': trig, 'goal_object_where': p.get('goal_object_where'),
-                          'held_or_between_fingers': p.get('held_or_between_fingers'), 'is_goal_object': p.get('is_goal_object'),
-                          'matched_language_goal': True if p.get('is_goal_object') is True else (False if p.get('is_goal_object') is False else None),
-                          'failure_class': p.get('failure_class'), 'diagnosis': p.get('diagnosis')})
-        return 'patched', {**PATCH, 'failure_class': p.get('failure_class'), 'goal_object_where': p.get('goal_object_where'), 'held_or_between_fingers': p.get('held_or_between_fingers'), 'is_goal_object': p.get('is_goal_object'), 'diagnosis': p.get('diagnosis'), 'lesson': les, 'plan_done': done_steps}
-    except AC.CapReached: raise
-    except Exception as e: return f'fallback_error:{e}', None
+    # Revoke pending advice before changing the target it was based on.
+    _abandon_async_slow(reason=f'fallback:{trig}')
+    perception = do_relook(f'fallback:{trig}')
+    if perception == 'relook_error':
+        return 'fallback_perception_error', None
+    result, detail = _sync_slow('fallback', perception, f'fallback:{trig}')
+    return result, {**PATCH, 'trigger': trig, 'perception': perception, 'slow_detail': detail}
+
 
 def fb_trigger():
     if not FALLBACK or P['fb'] >= MAX_FB: return None
@@ -2860,7 +2591,7 @@ try:
     intents = {i['name']: i for i in LIB['intents']}
     while T[0] < HORIZON and not DONE[0] and dec < MAX_DEC:
         trig = fb_trigger()
-        if trig:  # early Astra fallback: episode-only re-perception (never edits the library)
+        if trig:  # early perception-and-Codex recovery: episode-only re-perception (never edits the library)
             P['fb'] += 1; r, pt = do_fallback(trig); fb_events.append({'dec': dec, 'trigger': trig, 'result': r, 'patch': pt})
             log(dec=dec, t=T[0], fallback=trig, result=r, patch=pt)
             CUR.update(fb=f"{trig} -> {r} " + (f"dz={pt['grasp_dz_objh']:+.2f}objh tilt={pt['tilt_deg']} yaw={pt['yaw_deg']}" if pt else ''), fb_t=T[0])
@@ -2954,7 +2685,7 @@ try:
         if len(EP['grip_hist']) >= 2 and EP['grip_hist'][-1] != EP['grip_hist'][-2]:
             EP['stage_fail_mark'] = 0
         log(dec=dec, t=T[0], intent=it, forced=forced, result=r, facts=f)
-        # hybrid Astra help: ask_astra already ran sync in execute; else hard-force; else spectator gate; else normal slow-think
+        # Codex planning help: ask_astra already ran sync in execute; else hard-force; else spectator gate; else normal slow-think
         if r != 'finish' and not DONE[0] and T[0] < HORIZON:
             skip = {'rate_limited', 'skip_at_target', 'skip_finish', 'disabled', 'done', 'slow_cap', 'async_busy',
                     'ask_astra_disabled', 'ask_astra_cap', 'spectator_disabled', 'spectator_cap'}
@@ -2973,7 +2704,7 @@ try:
                     slow_events.append({'dec': dec, 'intent': it, 'intent_result': r, 'result': sr, 'detail': so, 'source': hard})
                     log(dec=dec, t=T[0], slow_think=sr, intent=it, intent_result=r, detail=so, source=hard)
                 else:
-                    # Spectator Jev (旁观者清): additive gate — may defer to Astra when acting looks stuck
+                    # Spectator Jev (旁观者清): additive gate — may request Codex help when acting looks stuck
                     gate_fired = False
                     if _spectator_gate_eligible(it, dec):
                         signals = _spectator_distress_signals(it, r)
@@ -3010,7 +2741,6 @@ try:
     if DONE[0]: end = 'success' if stop is None else f'{stop}_then_success'
     else: end = f'{stop}_not_success' if stop else 'horizon'
     res['stopped_at_step'] = t_stop if stop else None
-except AC.CapReached as e: end = 'astra_cap'; res['error'] = str(e)
 except Exception:
     import traceback; end = 'harness_error'; res['error'] = traceback.format_exc()[-1200:]
 # diagnostic: which sim body moved most (never shown to policy)

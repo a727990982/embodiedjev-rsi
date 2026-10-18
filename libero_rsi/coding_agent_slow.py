@@ -1,29 +1,8 @@
-"""Coding-agent mid-episode monitor + episode-start "Great Wall" planner.
+"""Codex episode-start planner and mid-episode monitor for the LIBERO harness.
 
-Replaces or dual-runs Astra slow-think with a coding-agent style monitor that
-reads text context (policy decision lines, experience_brief, PATCH/GOAL_ID) plus optional
-keyframe still paths, and returns the SAME episode-plan JSON the harness already
-applies via `_apply_episode_plan`.
-
-Also provides episode-start global planning (env EPISODE_START_PLAN) that emits
-an ordered predictive plan (push_aside / clear / relook / …) before the first
-approach — RSI start-of-episode reflection; mid-episode slow-think only fine-tunes.
-
-Backends (env CODING_AGENT_SLOW):
-  0 / unset  — disabled (harness uses Astra as today)
-  codex      — `codex exec` on PATH (or CODING_AGENT_CODEX_BIN). Optional proxy via
-               CODING_AGENT_HTTP_PROXY / CODING_AGENT_SOCKS; unset means direct.
-  dual       — call coding agent AND leave Astra path for A/B logging (harness dual)
-
-Episode-start (env EPISODE_START_PLAN):
-  0 / off    — disabled
-  codex      — start planner backend
-  astra      — harness uses Astra with the start-plan prompt
-  auto/empty — inherit CODING_AGENT_SLOW (or PERCEIVE) when those are on
-
-Any other value raises ValueError.
-
-This module is intentionally freestanding so smokes need no MuJoCo / Astra.
+Production uses Codex CLI for both planning stages and Astra perception/identity,
+and Jev for intent selection. Mock backends are removed; runtime role selection is not controlled by environment switches.
+Plans are episode-local structured data, not generated control code.
 """
 from __future__ import annotations
 
@@ -53,6 +32,7 @@ STALL_STEPS = frozenset({
 CODEX_BIN = os.environ.get('CODING_AGENT_CODEX_BIN', 'codex')
 CODEX_MODEL = os.environ.get('CODING_AGENT_CODEX_MODEL', 'gpt-6-astra')
 CODEX_EFFORT = os.environ.get('CODING_AGENT_CODEX_EFFORT', 'high')
+PERCEPTION_MODEL = 'gpt-6-astra'  # model role; invoked through the same Codex CLI transport
 # Optional proxy. Empty (the default) means a direct connection.
 DEFAULT_HTTP_PROXY = os.environ.get('CODING_AGENT_HTTP_PROXY', '').strip()
 DEFAULT_SOCKS = os.environ.get('CODING_AGENT_SOCKS', '').strip()
@@ -60,7 +40,7 @@ DEFAULT_SOCKS = os.environ.get('CODING_AGENT_SOCKS', '').strip()
 MONITOR_PROMPT = """You are a mid-episode coding-agent MONITOR for a Jev-controlled robot arm
 (LIBERO pick/place). You do NOT write control code. You only decide whether to
 intervene THIS EPISODE and emit a short structured plan the harness already knows
-how to apply (same schema as Astra slow-think).
+how to apply.
 
 Language goal: {lang}
 
@@ -109,12 +89,11 @@ Context JSON:
 
 
 def backend_mode(raw: Optional[str] = None) -> str:
-    v = (raw if raw is not None else os.environ.get('CODING_AGENT_SLOW', '0')).strip().lower()
-    if v in ('', '0', 'off', 'false', 'no', 'astra'):
-        return 'off'
-    if v in ('codex', 'dual'):
-        return v
-    raise ValueError(f'unsupported CODING_AGENT_SLOW={v!r}; use 0, codex or dual')
+    """Accept only Codex; removed backend names fail explicitly."""
+    mode = 'codex' if raw is None else raw.strip().lower()
+    if mode != 'codex':
+        raise ValueError(f'unsupported_planning_backend:{mode}')
+    return mode
 
 
 def pack_context(
@@ -244,6 +223,8 @@ def validate_intervention(parsed: Dict[str, Any]) -> Tuple[bool, List[str], Dict
     return (len(hard) == 0), errs, out
 
 
+
+
 def _proxy_env() -> Dict[str, str]:
     """Copy the process env and apply an optional proxy.
 
@@ -286,19 +267,22 @@ def _resolve_codex_bin() -> str:
     raise FileNotFoundError(f'codex_bin_missing:{raw}')
 
 
-def call_codex(prompt: str, image_paths: Sequence[str], *, timeout_s: float = 180.0) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def call_codex(prompt: str, image_paths: Sequence[str], *, timeout_s: float = 180.0,
+               model: Optional[str] = None, effort: Optional[str] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Invoke Codex CLI non-interactively; parse JSON from stdout.
 
     Prompt is always passed on stdin with argv `-` because `-i/--image` is
     variadic and would swallow a trailing prompt string as another image path
     (symptoms: "Reading prompt from stdin... No prompt provided").
     """
+    selected_model = CODEX_MODEL if model is None else model
+    selected_effort = CODEX_EFFORT if effort is None else effort
     bin_path = _resolve_codex_bin()
     cmd = [
         bin_path, 'exec',
         '--skip-git-repo-check',
-        '-m', CODEX_MODEL,
-        '-c', f'model_reasoning_effort="{CODEX_EFFORT}"',
+        '-m', selected_model,
+        '-c', f'model_reasoning_effort="{selected_effort}"',
     ]
     for p in list(image_paths)[:4]:
         if p and Path(p).is_file():
@@ -321,8 +305,8 @@ def call_codex(prompt: str, image_paths: Sequence[str], *, timeout_s: float = 18
     parsed = _extract_json(proc.stdout or out)
     rec = {
         'backend': 'codex',
-        'model': CODEX_MODEL,
-        'effort': CODEX_EFFORT,
+        'model': selected_model,
+        'effort': selected_effort,
         'wall_s': round(wall, 3),
         'cost_usd': 0.0,  # Codex CLI does not always expose; ledger separately if needed
         'returncode': proc.returncode,
@@ -341,19 +325,18 @@ def call_monitor(
     Raises on hard failure; caller may fall back to Astra.
     """
     mode = backend_mode(mode)
-    if mode == 'off':
-        raise RuntimeError('coding_agent_slow_disabled')
     prompt = build_prompt(ctx)
     images = list(ctx.get('keyframe_paths') or [])
-    # codex and dual both call Codex; under dual the harness separately applies Astra.
-    raw, rec = call_codex(prompt, images)
-    ok, errs, norm = validate_intervention(raw)
-    rec = dict(rec)
-    rec['validate_ok'] = ok
-    rec['validate_errs'] = errs
-    if not ok:
-        raise ValueError(f'codex_invalid:{errs}')
-    return norm, rec
+    if mode == 'codex':
+        raw, rec = call_codex(prompt, images)
+        ok, errs, norm = validate_intervention(raw)
+        rec = dict(rec)
+        rec['validate_ok'] = ok
+        rec['validate_errs'] = errs
+        if not ok:
+            raise ValueError(f'codex_invalid:{errs}')
+        return norm, rec
+    raise RuntimeError(f'unknown_mode:{mode}')
 
 
 def recent_diag_from_file(path: str, limit: int = 30) -> List[Any]:
@@ -404,7 +387,7 @@ def applicator_accepts(parsed: Dict[str, Any]) -> bool:
     return all(isinstance(st, dict) and st.get('step') in ALLOWED_STEPS for st in plan)
 
 
-# --- harness bridge helpers (imported only when CODING_AGENT_SLOW is on) ---
+# --- context capture helpers ---
 
 def prepare_slow_context(
     *,
@@ -446,13 +429,7 @@ def harness_call_from_slow(*, mode: Optional[str] = None, **kwargs):
     return call_monitor(prepare_slow_context(**kwargs), mode=mode)
 
 
-# ---------------------------------------------------------------------------
-# Episode-start / relook keypoint perception via coding agent
-# Env CODING_AGENT_PERCEIVE=0|codex (default off). Same flag covers
-# perceive_start AND mid-episode relook/escape_look (anything calling
-# harness perceive()). verify_grasp_identity stays on Astra.
-# ---------------------------------------------------------------------------
-
+# Astra visual perception through Codex CLI.
 PERCEIVE_PROMPT = """You are the perception module of a single Franka arm with a parallel gripper (top-down grasps).
 Task instruction (language goal): "{lang}"
 Image size: {img_size}x{img_size} px from a fixed front (agentview) camera; robot base at the TOP of the image. Pixel v grows downward.
@@ -487,15 +464,6 @@ Reply ONLY one JSON object (no markdown fences):
 
 Uncertain ≠ proceed: never claim matched_language_goal=true when unsure.
 """
-
-
-def perceive_backend_mode(raw: Optional[str] = None) -> str:
-    v = (raw if raw is not None else os.environ.get('CODING_AGENT_PERCEIVE', '0')).strip().lower()
-    if v in ('', '0', 'off', 'false', 'no', 'astra'):
-        return 'off'
-    if v == 'codex':
-        return v
-    raise ValueError(f'unsupported CODING_AGENT_PERCEIVE={v!r}; use 0 or codex')
 
 
 def _as_px(val: Any, img_size: int, errs: List[str], name: str) -> Optional[List[float]]:
@@ -561,6 +529,8 @@ def validate_keypoints(parsed: Dict[str, Any], *, img_size: int = 512) -> Tuple[
     return ok, errs, out
 
 
+
+
 def build_perceive_prompt(ctx: Dict[str, Any]) -> str:
     extra = ctx.get('extra_context') or ''
     if extra:
@@ -579,24 +549,25 @@ def call_perceive(
     mode: Optional[str] = None,
     image_paths: Optional[Sequence[str]] = None,
     timeout_s: float = 180.0,
+    effort: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Run perceive backend; return (normalized_keypoints, rec)."""
-    mode = perceive_backend_mode(mode)
-    if mode == 'off':
-        raise RuntimeError('coding_agent_perceive_disabled')
+    mode = backend_mode(mode)
     img_size = int(ctx.get('img_size') or 512)
     images = list(image_paths or ctx.get('image_paths') or [])[:4]
-    prompt = build_perceive_prompt(ctx)
-    raw, rec = call_codex(prompt, images, timeout_s=timeout_s)
-    ok, errs, norm = validate_keypoints(raw, img_size=img_size)
-    rec = dict(rec)
-    rec['validate_ok'] = ok
-    rec['validate_errs'] = errs
-    rec['phase'] = ctx.get('phase')
-    rec['backend'] = 'codex_perceive'
-    if not ok:
-        raise ValueError(f'codex_perceive_invalid:{errs}')
-    return norm, rec
+    if mode == 'codex':
+        prompt = build_perceive_prompt(ctx)
+        raw, rec = call_codex(prompt, images, timeout_s=timeout_s, model=PERCEPTION_MODEL, effort=effort)
+        ok, errs, norm = validate_keypoints(raw, img_size=img_size)
+        rec = dict(rec)
+        rec['validate_ok'] = ok
+        rec['validate_errs'] = errs
+        rec['phase'] = ctx.get('phase')
+        rec['backend'] = 'codex_perceive'
+        if not ok:
+            raise ValueError(f'codex_perceive_invalid:{errs}')
+        return norm, rec
+    raise RuntimeError(f'unknown_perceive_mode:{mode}')
 
 
 def harness_call_perceive(
@@ -607,8 +578,9 @@ def harness_call_perceive(
     context: Optional[str] = None,
     img_size: int = 512,
     mode: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Entry used by run_ep_fbpatch.perceive when CODING_AGENT_PERCEIVE != off."""
+    """Astra perception through Codex CLI for episode start and every relook."""
     ctx = {
         'language_goal': lang,
         'phase': phase,
@@ -616,15 +588,20 @@ def harness_call_perceive(
         'img_size': img_size,
         'image_paths': list(image_paths)[:4],
     }
-    return call_perceive(ctx, mode=mode, image_paths=image_paths)
+    return call_perceive(ctx, mode=mode, image_paths=image_paths, effort=effort)
+
+
+def call_identity_check(prompt: str, image_paths: Sequence[str], *, effort: Optional[str] = None):
+    """Verify a marked grasp pixel with Astra through Codex CLI."""
+    parsed, rec = call_codex(prompt, image_paths, model=PERCEPTION_MODEL, effort=effort)
+    rec = dict(rec)
+    rec['backend'] = 'codex_identity'
+    return parsed, rec
 
 
 # ---------------------------------------------------------------------------
 # Episode-start "Great Wall" global plan (predictive; before first approach)
-# Env EPISODE_START_PLAN=0|codex|astra|auto
-#   auto (default when unset/empty): inherit codex from CODING_AGENT_SLOW=codex|dual
-#     or CODING_AGENT_PERCEIVE=codex; else off. Explicit 0/off disables even if CODING_AGENT_SLOW on.
-# Prefer Codex; harness may fall back to Astra when mode=astra or codex fails.
+# Production uses Codex; tests inject fixed replies at the transport boundary.
 # Plan step vocabulary matches mid-episode slow-think → `_apply_episode_plan`.
 # ---------------------------------------------------------------------------
 
@@ -694,22 +671,7 @@ Context JSON:
 
 
 def start_plan_backend_mode(raw: Optional[str] = None) -> str:
-    """Resolve EPISODE_START_PLAN; empty/auto inherits CODING_AGENT_SLOW."""
-    if raw is None:
-        raw = os.environ.get('EPISODE_START_PLAN', '')
-    v = (raw or '').strip().lower()
-    if v in ('0', 'off', 'false', 'no'):
-        return 'off'
-    if v in ('codex', 'astra'):
-        return v
-    if v in ('auto', ''):
-        # Inherit Codex when the mid-episode monitor or perceive pilot already uses it.
-        if backend_mode(os.environ.get('CODING_AGENT_SLOW', '0')) in ('codex', 'dual'):
-            return 'codex'
-        if perceive_backend_mode(os.environ.get('CODING_AGENT_PERCEIVE', '0')) == 'codex':
-            return 'codex'
-        return 'off'
-    raise ValueError(f'unsupported EPISODE_START_PLAN={v!r}; use 0, codex, astra or auto')
+    return backend_mode(raw)
 
 
 def pack_start_context(
@@ -752,7 +714,7 @@ def _lang_multi_object_cues(lang: str) -> bool:
     t = (lang or '').lower()
     if re.search(r'\bboth\b', t):
         return True
-    # Classic dual noun phrases: "the cream cheese and the butter"
+    # Two-object noun phrases: "the cream cheese and the butter"
     if re.search(r'\bthe\s+[^,]{1,48}?\s+and\s+the\s+', t):
         return True
     # "A and B" where B is not a place/put verb or pronoun
@@ -883,6 +845,8 @@ def validate_start_plan(
     return (len(hard) == 0), errs, out
 
 
+
+
 def gate_start_plan(plan: Dict[str, Any], confirmed: bool) -> Dict[str, Any]:
     """Planning assertions cannot authorize contact with an unverified target."""
     out = dict(plan)
@@ -903,9 +867,7 @@ def call_start_plan(
     timeout_s: float = 180.0,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Run start-plan backend; return (normalized_plan, rec)."""
-    mode = start_plan_backend_mode(mode if mode is not None else (os.environ.get('EPISODE_START_PLAN') or 'auto'))
-    if mode == 'off':
-        raise RuntimeError('episode_start_plan_disabled')
+    mode = start_plan_backend_mode(mode)
     images = list(ctx.get('keyframe_paths') or [])[:4]
     if mode == 'codex':
         prompt = build_start_prompt(ctx)
@@ -918,9 +880,6 @@ def call_start_plan(
         if not ok:
             raise ValueError(f'codex_start_plan_invalid:{errs}')
         return norm, rec
-    if mode == 'astra':
-        # Harness supplies Astra via its own client; this module only documents the mode.
-        raise RuntimeError('astra_start_plan_must_be_called_from_harness')
     raise RuntimeError(f'unknown_start_plan_mode:{mode}')
 
 

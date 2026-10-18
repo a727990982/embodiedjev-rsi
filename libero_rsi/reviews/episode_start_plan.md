@@ -1,13 +1,10 @@
 # Episode-start Great Wall plan (2026-10-18)
 
-## Enable
-```bash
-export EPISODE_START_PLAN=codex   # or astra|auto
-# auto inherits CODING_AGENT_SLOW / CODING_AGENT_PERCEIVE when those are on
-export CODING_AGENT_SLOW=codex    # optional mid-episode monitor
-```
+## Current execution
 
-Helper: `runs/coding_agent_slow_ab/run_one.sh SUITE TID INIT [slow] [perceive] [start_plan]`
+The harness invokes Codex for start planning and slow-think, and invokes Astra through Codex CLI for perception/identity. Jev chooses intents. The former role-selection environment switches and mock backends are removed; see [current setup](../../README.md#fixed-model-roles).
+
+The runs below are historical records. In particular, the old proposal to confirm identity from a start-plan assertion has been superseded by `gate_start_plan`: planning cannot elevate the identity gate.
 
 ## Smoke (libero_object cream t1_i0)
 - Mock path (executed push): `runs/ep_start_plan_cream/libero_object_t1_i0_mock_spmock/libero_object_t1_i0/`
