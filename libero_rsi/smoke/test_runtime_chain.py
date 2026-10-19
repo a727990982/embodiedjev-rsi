@@ -113,6 +113,9 @@ def fake_run(destination, fail_start=False):
             raw = {'items': [{'id': 'butter', 'status': 'pending', 'evidence': 'not placed'}]}
         elif 'episode-START' in prompt:
             events.append('start_plan')
+            assert 'approach_geometry' in prompt and 'maximum_finger_opening_m' in prompt
+            assert any(Path(image).name == 'start_approach_overlay.png' for image in images)
+            assert all(Path(image).is_file() for image in images)
             if fail_start: raise RuntimeError('injected start failure')
             raw = {'matched_language_goal': True, 'issue': 'ok', 'intervene': False,
                    'task_todo': {'items': [{'id': 'butter', 'target': 'butter', 'goal': 'put butter in basket', 'completion_condition': 'butter inside basket and released'}]},

@@ -18,6 +18,11 @@ INSTRUCTIONS = (
     'transport and placement. A pending final outcome does not mean the grasp failed. '
     'Preserve a currently confirmed target grasp while advancing toward placement. '
     'last_visual_review may predate the latest executor checkpoints. '
+    'Use motion_context: requested versus actual motion, robot-part contacts, and failed waypoints. '
+    'A stalled motion is not proof of collision; compare the historical motion_before_image with '
+    'CURRENT cameras to distinguish obstruction, poor alignment, and unreachable estimates. '
+    'Do not repeat an unchanged blocked motion. Back off or change the approach, or ask for help '
+    'when budget remains. Startup obstacle advice is a prediction, not current evidence. '
     'Respect candidate applicability conditions. If the target is not visible or alignment '
     'is uncertain, relook or ask_astra; do not move blindly using remembered positions. '
     'A close command does not prove a grasp. Nearly closed fingers without contact cannot '
@@ -30,7 +35,7 @@ INSTRUCTIONS = (
 APPLICABILITY = {
     'move_above_object': 'Use when the active target is visible and needs a new approach. Open the fingers and move above its localized grasp point. Do not release a securely held requested target.',
     'descend_to_grasp': 'Use when current images show the visible active target below an aligned, open gripper. Descend with fingers open. It does not correct an empty closed grasp.',
-    'close_gripper': 'Use when the fingers are open enough to admit the visible, aligned active target. Close at a fixed end-effector pose. Repeating this command with nearly closed fingers and no contact does not create a new grasp.',
+    'close_gripper': 'Use only after the open fingers reach the grasp position in both XY and height, with the visible target between them. Being above the target is insufficient. The executor checks current position against the visual grasp estimate before closing.',
     'reopen_and_retry': 'Use when the fingers are closed without a secure target grasp, or when holding the wrong object. Open the fingers at the current pose; choose alignment or relook separately afterward.',
     'lift': 'Use when current images, opening and contacts support a secure grasp of the active target, and it needs clearance for transport. Raise while keeping the grip; it cannot acquire an object from below empty fingers.',
     'carry_to_place': 'Use when the active target is securely held and clear of surrounding objects. Carry above its destination while maintaining the grip.',
@@ -41,6 +46,9 @@ APPLICABILITY = {
     'ask_astra': 'Ask Codex slow-think and Astra todo review for help when stuck, the active goal is unclear, or current images contradict todo progress.',
     'consult_astra': 'Alias of ask_astra: request slow-think and a current-image todo review.',
     'finish': 'Use only when official_success is true; placement progress or an all-done todo alone is insufficient.',
+    'back_off': 'Move upward a short distance while preserving the current grip, to back away from a failed approach or transport. This does not guarantee clearance; inspect the motion result before proceeding.',
+    'clear_reapproach': 'When not securely holding the target, retreat upward and adjust the approach using existing recovery geometry. Prefer after an obstructed or repeatedly stalled descent; it does not acquire a grasp.',
+    'change_approach_yaw': 'When not securely holding the target, retreat and change the commanded approach yaw before approaching again. Use when the current hand orientation appears blocked. This does not prove a collision-free path.',
 }
 
 

@@ -43,17 +43,23 @@ does not claim that the corresponding motion was executed.
 
 Acting Jev receives the todo, current front/wrist images (wrist when available),
 end-effector pose, finger joint positions/opening, commanded open/closed state,
-per-finger contacts and official success. All images and sensors come from the
-same simulation step, after any recovery motion. Jev no longer receives cached
-`seen_held`, `at_grasp`, `above_place`, grasp/place coordinates, predicate meanings,
-active recovery matches or a static phase-order prior as current facts.
+per-finger contacts and official success. Current images and sensors come from the
+same simulation step, after any recovery motion. `motion_context` adds robot-part
+contact locations (including palm/arm and fixtures), the last requested/actual
+movement and remaining error, plus a visual-waypoint proximity check. Failed
+motion before-images and startup obstacle advice are explicitly historical.
+Commanded waypoints are estimates, never simulator object truth or a certificate
+of a collision-free path. Cached `seen_held` and library predicates are not sent.
 
 Acting Jev additionally receives the last eight completed intent/result pairs,
 plus the consecutive count of the same intent and the same intent/result pair.
 Counts cover the full trailing streak even when it exceeds eight actions.
 These are past executor outcomes, not assertions about the current scene or
-task completion. Candidate applicability remains unchanged; the instructions
-also explain how to use stage progress and preserve a confirmed grasp.
+task completion. The instructions explain stage progress and preserving a
+confirmed grasp. Candidate and executor checks reject closes above/off the grasp
+position, opening/reapproach motions that would discard a supported target grasp,
+and release before the destination waypoint. An unchanged failed motion requires
+a changed target/orientation or an executed back-off before retry.
 `lift`, `carry_to_place` and `lower_to_place` are offered only with a confirmed
 target grasp supported by current gripper contacts/opening. The executor repeats
 this check, including for forced actions, and never implicitly closes an empty
@@ -61,6 +67,15 @@ gripper for a transport request. A failed close returns
 `grasp_failed:transport_not_executed`; a blocked transport returns
 `<intent>_not_executed:grasp_unconfirmed`. These failure results enter the next
 Jev history and trigger the existing failure/todo-review paths.
+
+Astra's startup assessment receives an annotated TCP approach/descent route,
+visual waypoint estimates, commanded orientation and finger opening. It reports
+clear/risk/uncertain, the affected phase/robot part and a suggested recovery.
+Jev can choose `back_off` (preserves grip), `clear_reapproach`, or
+`change_approach_yaw` using the existing recovery executor. General slow-think
+uses `MAX_SLOW`; when that budget is exhausted, one additional **motion-stall**
+diagnosis is available if `MAX_SLOW > 0` and fallback is enabled. It is spent even
+on a failed API request. No unbounded retry or runtime code change is introduced.
 
 Candidates describe applicability and actual motion. An empty closed gripper
 should reopen; `reopen_and_retry` opens **at the current pose**, leaving alignment
