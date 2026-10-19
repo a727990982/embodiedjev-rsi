@@ -1,8 +1,10 @@
 # Call-chain audit — 2026-10-18
 
+The todo/image changes are documented in [the current runtime contract](../ADAPTER.md); the dependency and invocation statements below describe the earlier revision.
+
 Audited the PR branch starting at `e6ad561`, then integrated the concurrent removal of mock backends at `4474c76` and reran the tests. This is a code/interface and offline execution audit, not a LIBERO performance result.
 
-## Current invocation chain
+## Invocation chain at the audited revision
 
 | Stage | Actual entry and result |
 |---|---|
@@ -38,7 +40,7 @@ No production `astra_client`, `AC.call`, `dual`, or alternate planner transport 
 - Python syntax and module-global symbol checks passed. These checks do not prove numerical control behavior.
 - The locally installed `codex exec --help` confirms the used CLI image/model/stdin options. No real model request was made during this audit.
 
-## Remaining runtime requirements and limits
+## Runtime requirements and limits at the audited revision
 
 The current local Python environment does not provide `jev_choice`, LIBERO, MuJoCo, robosuite, or SciPy. NumPy, Pillow, and the Codex executable are present. Therefore this checkout still cannot run a real episode on this machine without installing/providing those dependencies and the LIBERO assets.
 

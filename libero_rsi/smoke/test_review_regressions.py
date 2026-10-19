@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import coding_agent_slow as CAS
 import jev_experience as JX
+import task_todo as TODO
 import validate
 
 TREE = ast.parse((ROOT / 'run_ep_fbpatch.py').read_text())
@@ -32,6 +33,7 @@ class RegressionTests(unittest.TestCase):
             with self.subTest(match=match), tempfile.TemporaryDirectory() as temp:
                 plan = dict(matched_language_goal=match, issue='blocked_by_neighbour', intervene=True,
                             step1_must='push_aside', plan=[{'step': 'push_aside'}], phase_order=['clear_neighbour'])
+                plan['task_todo'] = {'items': [{'id': 'object', 'target': 'object', 'goal': 'put in basket', 'completion_condition': 'inside basket and released'}]}
                 gid = {'confirmed': False, 'events': []}
                 ep = {}
                 applied = []
@@ -39,7 +41,8 @@ class RegressionTests(unittest.TestCase):
                     JX=JX, LIB={'intents': [], 'lessons': []}, dsl=None,
                     EP=ep, GOAL_ID=gid, T=[37], START_ID={'final': {}, 'verify': {}}, per0={},
                     LANG='put object in basket', ep_dir=temp, log=lambda **kw: None,
-                    _account_slow_rec=lambda rec: None,
+                    _account_slow_rec=lambda rec: None, TODO=TODO,
+                    _save_task_todo=lambda reason: None, _retarget_todo=lambda: None,
                     _apply_episode_plan=lambda *a, **kw: applied.append(a), DEP0=None)
                 with patch.object(CAS, 'harness_call_start_plan', return_value=(plan, {'backend': 'codex_start'})) as planner:
                     result = scope['_run_episode_start_plan']()

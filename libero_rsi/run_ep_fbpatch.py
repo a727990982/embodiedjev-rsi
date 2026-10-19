@@ -14,10 +14,10 @@ Policy-visible signals (documented in ADAPTER.md):
          On stall with identity confirmed: must update the shared target (raise/shift/relook-refresh); relook executes fresh perception.
   success: official env (BDDL check_success) -> done flag. Binary only, ends the episode.
 No simulator object/target ground-truth poses reach the policy.
-Jev state includes experience_brief: short actionable recoveries (when→prefer) + relevant lessons (when→instead), not a full prose dump; general triggers only.
+Jev receives task todo, same-frame camera images and full proprioception. Controller facts and experience briefs stay with the executor/Codex planner.
 Codex planning help: the existing ask_astra/consult_astra intent names request Codex; hard rules and a spectator Jev may request synchronous help on distress signals; all share MAX_SLOW.
 Codex handles episode-start global planning and sync/async slow-think. Astra, invoked through Codex CLI, handles visual perception and identity verification; Jev selects each intent. Model roles are fixed.
-Plan JSON is persisted as start_plan.json; mid-episode slow-think fine-tunes the episode plan.
+Start planning includes task_todo; Astra reviews outcome progress on current images. Jev selects applicable actions for the active objective.
 After close_gripper: proprio+lift grasp confirm (log grasp_confirm); secured → lift, suppress push_aside/local_deadend undo.
 Hard local-deadend rule: repeated local stall family (push_aside/clear_reapproach/raise_redescend/lateral) without progress, or push_aside episode/approach cap → retreat + global front relook + SYNCHRONOUS slow-think replan (Codex slow-think); Jev motion held until plan applied.
 Place-phase: after carry_to_place reached, N consecutive lower_to_place stall/timeout (MAX_PLACE_LOWER_STALL) or M lift↔lower cycles (MAX_PLACE_LIFT_LOWER_CYCLES) while TCP/held XY is over the place region → force open_gripper (log place_force_release); avoid endless lift↔lower thrash over basket.
@@ -27,21 +27,12 @@ import os, sys, json, time, gc, re, threading, queue
 os.environ.setdefault('MUJOCO_GL', 'egl'); os.environ.setdefault('PYOPENGL_PLATFORM', 'egl')
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
-# Optional Jev client from a larger bench checkout.
-for _extra in (
-    os.path.join(_HERE, 'bench_common'),
-    os.path.abspath(os.path.join(_HERE, '..', '..', 'bench', 'common')),
-):
-    if os.path.isdir(_extra):
-        sys.path.insert(0, _extra)
+# The bundled TypeSafe client is part of this checkout; no external text-only
+# jev_choice module may shadow the production image transport.
+import jev_choice as JC
+import jev_observation as JO
+import task_todo as TODO
 import numpy as np
-try:
-    import jev_choice as JC
-except ModuleNotFoundError as ex:
-    if ex.name != 'jev_choice':
-        raise
-    raise SystemExit(f'Missing external client {ex.name}. See libero_rsi/ADAPTER.md; '
-                     'provide the bench clients via PYTHONPATH or libero_rsi/bench_common/.') from ex
 import dsl_libero as dsl
 from validate import validate
 import jev_experience as JX
@@ -111,7 +102,7 @@ def make_env():
     for a in range(4):
         try:
             e = OffScreenRenderEnv(bddl_file_name=os.path.join(get_libero_path('bddl_files'), task.problem_folder, task.bddl_file),
-                                   camera_heights=S, camera_widths=S, camera_depths=True)
+                                   camera_heights=S, camera_widths=S, camera_depths=True, horizon=HORIZON)
             e.seed(0); e.reset(); o = e.set_init_state(b.get_task_init_states(tid)[init_i]); return e, o
         except Exception as ex:
             last = ex; gc.collect(); time.sleep(3 + 3 * a)
@@ -153,10 +144,12 @@ def vid_frame(a):
     VID.stdin.write(im.tobytes())
 def step(a):
     global obs
+    if DONE[0] or T[0] >= HORIZON:
+        return
     obs, r, done, info = env.step(np.clip(a, -1, 1)); T[0] += 1
     if VID: vid_frame(a)
     if DIAGF and globals().get('EP', {}).get('n_close', 0) > 0: diag()
-    if done: DONE[0] = True
+    if env.env._check_success(): DONE[0] = True
 for _ in range(10): step([0, 0, 0, 0, 0, 0, -1])
 
 # ---- tactile proxy ----
@@ -210,6 +203,13 @@ def set_goal_id(confirmed, source, detail=None):
     return ok
 def goal_id_confirmed():
     return GOAL_ID.get('confirmed') is True
+def _active_language_goal():
+    item = TODO.active_item(globals().get('EP', {}).get('task_todo'))
+    if item is None:
+        return LANG
+    return f"{LANG}\nCurrent TODO target: {item['target']}. Current objective: {item['goal']}. Localize and verify ONLY this target."
+
+
 def perceive(context=None, phase=None):
     """Use Codex CLI to ask Astra for visual keypoints at start and on relook."""
     import coding_agent_slow as CAS
@@ -225,7 +225,7 @@ def perceive(context=None, phase=None):
         _PILImage.fromarray(wrist[::-1]).save(wrist_frame)
         images.append(wrist_frame)
     parsed, rec = CAS.harness_call_perceive(
-        lang=LANG, phase=ph, image_paths=images, context=context,
+        lang=_active_language_goal(), phase=ph, image_paths=images, context=context,
         img_size=S, mode='codex', effort=ASTRA_EFFORT)
     P['astra_cost'] += rec['cost_usd']; P['astra_calls'] += 1; P['last_astra_wall'] = time.time()
     log(t=T[0], perception=True, phase=ph, backend=rec.get('backend'),
@@ -387,7 +387,7 @@ def verify_grasp_identity(p, rgb, phase='perceive_start_verify'):
     r = 14; d.ellipse([u - r, v - r, u + r, v + r], outline=(255, 0, 0), width=3)
     d.line([u - 18, v, u + 18, v], fill=(255, 0, 0), width=2); d.line([u, v - 18, u, v + 18], fill=(255, 0, 0), width=2)
     d.text((6, 6), 'RED MARK = proposed grasp', fill=(255, 0, 0))
-    prompt = (f'Task instruction (language goal): "{LANG}".\n'
+    prompt = (f'Task instruction (language goal): "{_active_language_goal()}".\n'
               f'The RED circle+cross marks the proposed grasp pixel from a prior look.\n'
               f'Using ONLY the language goal and THIS image (do not rely on memorized brand looks):\n'
               f'{{"marked_object_what": short phrase naming what body the mark sits on,\n'
@@ -477,7 +477,8 @@ EP = {'closed': False, 'n_same': 0, 'prev': 'none', 'step': 0, 'ever_contact': F
       'last_result': 'none', 'stall_feedbacks': 0, 'gate_jev_last_dec': None, 'gate_jev_calls': 0,
       'need_reapproach': False, 'reapproach_reason': None, 'reapproach_rev': 0,
       'clear_reapproach_n': 0, 'push_aside_n': 0, 'push_aside_approach_n': 0, 'last_stall_issue': None,
-      'start_plan': None, 'start_plan_rec': None,
+      'start_plan': None, 'start_plan_rec': None, 'task_todo': None, 'todo_calls': 0,
+      'todo_target_id': None, 'todo_review_due': None, 'vision_serial': 0,
       'local_fb_family_hist': [], 'local_deadend_n': 0, 'local_deadend_global_relooks': 0,
       'last_local_deadend_reason': None, 'grasp_secured_once': False, 'in_local_deadend': False,
       'grasp_confirm': False, 'grasp_confirm_detail': None,
@@ -663,6 +664,93 @@ def facts(ns, preds):
          'grasp_point_estimate_m': r3(ns['grasp']), 'object_top_centre_estimate_m': r3(ns['objc']), 'place_point_estimate_m': r3(ns['place']),
          'object_height_estimate_m': round(ns['obj_h'], 3), 'previous_intent': ns['prev'], 'decisions_in_previous_intent': ns['n_same'], 'last_intent_result': ns.get('last_result', 'none')}
     f.update(preds); return f
+
+
+def _current_observation():
+    """Capture images and measured proprioception without stepping the simulator."""
+    left, right = contacts()
+    proprio = {
+        'gripper_xyz_m': obs['robot0_eef_pos'].tolist(),
+        'gripper_orientation_xyzw': obs['robot0_eef_quat'].tolist(),
+        'finger_joint_positions_m': obs['robot0_gripper_qpos'].tolist(),
+        'fingers_opening_m': opening(), 'gripper_closed_command': bool(EP['closed']),
+        'left_finger_contact': bool(left), 'right_finger_contact': bool(right),
+    }
+    frames = {'front': obs['agentview_image'][::-1].copy()}
+    if obs.get('robot0_eye_in_hand_image') is not None:
+        frames['wrist'] = obs['robot0_eye_in_hand_image'][::-1].copy()
+    return proprio, frames
+
+
+def _jev_input():
+    proprio, frames = _current_observation()
+    state, assets = JO.build_state(LANG, EP['task_todo'], proprio, frames, T[0], DONE[0])
+    # Store the exact observation sent to Jev; no privileged diagnostic fields.
+    EP['vision_serial'] += 1
+    paths = {}
+    for name, pixels in frames.items():
+        path = os.path.join(ep_dir, f'jev_{EP["vision_serial"]}_{name}.png')
+        Image.fromarray(pixels).save(path)
+        paths[name] = path
+    log(t=T[0], jev_observation=True, state=state, frames=paths)
+    return state, assets
+
+
+def _save_task_todo(reason):
+    with open(os.path.join(ep_dir, 'task_todo.json'), 'w') as output:
+        json.dump(EP['task_todo'], output, indent=2)
+    log(t=T[0], task_todo=EP['task_todo'], todo_reason=reason)
+
+
+def _retarget_todo():
+    """Invalidate old grasp state; localize and verify the active todo object."""
+    item = TODO.active_item(EP['task_todo'])
+    new_id = item['id'] if item else None
+    if EP.get('todo_target_id') == new_id:
+        return
+    _abandon_async_slow('todo_target_changed')
+    old_id = EP.get('todo_target_id')
+    EP['todo_target_id'] = new_id
+    EP.update(force_next_intent=None, grasp_confirm=False, grasp_secured_once=False,
+              ever_contact=False, place_carry_reached_once=False, place_lower_stall_n=0,
+              place_lift_lower_cycles=0, place_cycle_armed=False, place_force_release=False,
+              place_force_release_reason=None, uses={})
+    _reset_patch('todo_target_changed')
+    RSHAPE.update(tilt=None, tdir=None, yaw=None, dz=0.0)
+    EP.update(tcp_at_close=None, opening_at_close=None, n_same=0,
+              last_stall_issue=None, local_fb_family_hist=[], push_aside_approach_n=0)
+    PER['seen_held'] = False
+    set_goal_id(False, 'todo_target_changed', {'old': old_id, 'new': new_id})
+    GOAL_TARGET['rev'] += 1
+    if item is not None:
+        p, rgb, dep = perceive(phase='todo_target')
+        _commit_keypoints(p, dep, 'todo_target', held_now=False)
+        verification, _ = verify_grasp_identity(p, rgb, phase='todo_target')
+        matched = identity_ok(p) and verification.get('is_language_goal_object') is True
+        set_goal_id(matched, 'todo_target_verified', verification)
+        if not matched:
+            EP['force_next_intent'] = 'relook'
+    log(t=T[0], todo_target_switch=True, old_id=old_id, new_id=new_id)
+
+
+def _review_task_todo(reason):
+    """Only the main thread reviews and commits progress from current frames."""
+    import coding_agent_slow as CAS
+    _abandon_async_slow('todo_review')
+    proprio, frames = _current_observation()
+    paths = []
+    for name, pixels in frames.items():
+        path = os.path.join(ep_dir, f'todo_{EP["todo_calls"]}_{name}.png')
+        Image.fromarray(pixels).save(path)
+        paths.append(path)
+    updated, rec = CAS.call_todo_review(todo=EP['task_todo'], proprioception=proprio,
+                                       image_paths=paths, step=T[0], reason=reason)
+    EP['todo_calls'] += 1
+    P['astra_calls'] += 1
+    P['astra_cost'] += rec['cost_usd']
+    EP['task_todo'] = updated
+    _save_task_todo(reason)
+    _retarget_todo()
 
 def servo(target, grip, gain=1.0, max_steps=60, tol=.006):
     last = eef(); stall = 0
@@ -1637,7 +1725,11 @@ def execute(name, ns):
     if act in ASK_ASTRA_NAMES or name in ASK_ASTRA_NAMES:
         return do_ask_astra(f'jev_intent:{name}')
     if act == 'relook': return do_relook('library rule chose relook')
-    if act == 'finish': return 'finish'
+    if act == 'finish':
+        EP['todo_review_due'] = 'finish_requested'
+        return 'finish' if DONE[0] else 'skip_finish'
+    if name == 'close_gripper' and EP['closed']:
+        return 'already_closed'
     if fing == 'close' and not EP['closed']:
         # HARD GATE: null/false/unsure goal identity ⇒ force relook, refuse close until matched. Uncertain ≠ proceed.
         # When relook budget is exhausted, DO NOT freeze: raise + relative approach change + escape look.
@@ -1687,6 +1779,11 @@ def execute(name, ns):
     if fing == 'open' and EP['closed']:
         EP['closed'] = False; grip(-1, 15); EP['released'] = True; EP['just_released'] = True
         EP['grasp_confirm'] = False
+        EP['grasp_secured_once'] = False
+        PER['seen_held'] = False
+        EP['todo_review_due'] = 'gripper_released'
+    if name == 'reopen_and_retry':
+        return 'reopened'  # Opening is separate from approaching a potentially stale point.
     try: tgt = np.asarray(dsl.evaluate(it['refpoint'], ns), float).reshape(3)
     except Exception as e: return 'refpoint_error'
     def ev(k):
@@ -1853,8 +1950,8 @@ def _apply_episode_plan(p, dep, source='slow'):
 
 def _run_episode_start_plan():
     """Great Wall: predictive global plan after start identity, before first approach.
-    Uses Codex; applies via `_apply_episode_plan`; persists start_plan.json.
-    Mid-episode slow-think must only fine-tune this prior, not replan from zero."""
+    Astra via Codex writes the todo and start_plan.json before target localization.
+    The todo owns task progress; phase_order remains historical planner advice."""
     import coding_agent_slow as CAS
     mode = 'codex'
     out = {'mode': mode, 'applied': False, 'plan_done': [], 'error': None}
@@ -1941,6 +2038,9 @@ def _run_episode_start_plan():
         art = {'plan': parsed, 'proposed_plan': proposed_plan, 'rec': rec, 'start_hints': start_hints, 'mode': mode, 'experience_brief': brief}
         with open(os.path.join(ep_dir, 'start_plan.json'), 'w') as plan_file:
             json.dump(art, plan_file, indent=1, default=str)
+        EP['task_todo'] = TODO.initialize(parsed.get('task_todo'), LANG, T[0])
+        _save_task_todo('start_plan')
+        _retarget_todo()
         EP['start_plan'] = parsed
         EP['start_plan_rec'] = {k: rec.get(k) for k in ('backend', 'wall_s', 'cost_usd', 'model', 'effort', 'validate_ok', 'validate_errs') if k in (rec or {})}
         out['plan'] = parsed
@@ -1951,23 +2051,10 @@ def _run_episode_start_plan():
             predicted_risks=(parsed or {}).get('predicted_risks'),
             phase_order=(parsed or {}).get('phase_order'),
             plan=(parsed or {}).get('plan'))
-        if parsed and parsed.get('intervene') and (parsed.get('plan') or []):
-            if str(parsed.get('issue') or '') == 'blocked_by_neighbour':
-                EP['last_stall_issue'] = 'blocked_by_neighbour'
-            if not goal_id_confirmed():
-                # A planning assertion is not a keypoint/identity verification.
-                # Queue a real perception intent before starting task motion.
-                EP['force_next_intent'] = 'relook'
-                out['plan_done'] = ['relook_queued_identity_unconfirmed']
-                log(t=T[0], episode_start_plan_deferred=True, reason='identity_unconfirmed')
-                return out
-            done = _apply_episode_plan(parsed, DEP0, source='episode_start')
-            out['plan_done'] = done
-            out['applied'] = True
-            log(t=T[0], episode_start_plan_applied=True, plan_done=done, patch=dict(PATCH))
-            # After clearance, force re-approach above object (push_aside also sets this).
-            if EP.get('force_next_intent') is None:
-                EP['force_next_intent'] = 'move_above_object'
+        # Keep start recovery advice as a recorded proposal. The first acting
+        # decision uses the newly localized todo target and current images.
+        if not goal_id_confirmed():
+            EP['force_next_intent'] = 'relook'
         return out
     except Exception as ex:
         out['error'] = str(ex)[:400]
@@ -2120,6 +2207,8 @@ def _prepare_slow_snapshot(ctx, crit, phase, both, image_tag):
         experience_brief=brief, patch=PATCH,
         goal_id={'confirmed': goal_id_confirmed(), 'target': GOAL_TARGET},
         ep_dir=ep_dir, keyframe_paths=[frame])
+    context['task_todo'] = json.loads(json.dumps(EP.get('task_todo')))
+    context['active_goal'] = TODO.active_item(context['task_todo']) if context['task_todo'] else None
     return {'t': T[0], 'coding_context': context}
 
 
@@ -2427,46 +2516,22 @@ def _spectator_gate_eligible(intent, dec):
     return True
 
 def _spectator_jev_state(intent, result, signals, ns, facts):
-    """Compact spectator context — trajectory + brief, not video."""
-    brief = JX.build_jev_experience_brief(
-        LIB, facts=facts, ns=ns, uses=EP.get('uses'), episode_lessons=FB_LESSONS, dsl=dsl,
-        max_recoveries=4, max_lessons=3, max_active=2,
-    )
-    return {
-        'role': 'spectator_gate',
-        'note': (
-            'You are a separate spectator (旁观者清), NOT the acting policy. '
-            'Acting Jev can be 当局者迷 — stuck repeating a bad plan. '
-            'Decide whether to hand control to Codex slow-think using the current visual evidence.'
-        ),
-        'language_goal': LANG,
-        'just_finished_intent': intent,
-        'intent_result': result,
-        'distress_signals': signals,
+    """Current image/todo/proprioception plus actual execution events."""
+    state, assets = _jev_input()
+    state['role'] = 'spectator_gate'
+    state['execution_events'] = {
+        'just_finished_intent': intent, 'intent_result': result,
         'recent_intents': (EP.get('hist') or [])[-8:],
         'recent_intent_results': (EP.get('result_hist') or [])[-8:],
-        'goal_id_confirmed': goal_id_confirmed(),
-        'close_refusals': GOAL_ID.get('close_refusals', 0),
-        'stall_feedback_count': EP.get('stall_feedbacks', 0),
-        'n_same': EP.get('n_same', 0),
-        'slow_used': P['slow'],
-        'max_slow': MAX_SLOW,
-        'key_facts': {
-            'both_fingers_contact': facts.get('both_fingers_contact'),
-            'times_closed': facts.get('times_closed'),
-            'last_intent_result': facts.get('last_intent_result'),
-            'previous_intent': facts.get('previous_intent'),
-            'descent_stalled': facts.get('descent_stalled'),
-            'descent_servo_stalled': facts.get('descent_servo_stalled'),
-            'empty_close': facts.get('empty_close'),
-        },
-        'experience_brief': brief,
+        'slow_used': P['slow'], 'max_slow': MAX_SLOW,
     }
+    return state, assets
+
 
 _SPECTATOR_CRITERIA = {
     'defer_to_astra': (
         'Yes — request Codex planning: acting looks stuck, identity doubtful, oscillating, '
-        'or experience_brief suggests a vision consult would help. Shares slow-think budget.'
+        'or current images contradict task_todo progress. Shares slow-think budget.'
     ),
     'continue_acting': (
         'No — let acting Jev keep going; progress looks plausible or distress is mild / already handled.'
@@ -2477,16 +2542,16 @@ def _spectator_jev_should_ask_astra(intent, result, signals, ns, facts, dec):
     """Light spectator Jev call → (defer: bool, detail dict). Updates cooldown on every call."""
     EP['gate_jev_last_dec'] = dec
     EP['gate_jev_calls'] = int(EP.get('gate_jev_calls') or 0) + 1
-    state = _spectator_jev_state(intent, result, signals, ns, facts)
+    state, assets = _spectator_jev_state(intent, result, signals, ns, facts)
     instr = (
         'Spectator gate only: choose defer_to_astra OR continue_acting. '
-        'Prefer defer_to_astra when distress_signals show stall/identity/oscillation/repeat without clear recovery, '
-        'or when active_recoveries/lessons imply a vision check. Prefer continue_acting when the last result '
+        'Prefer defer_to_astra when execution_events and current images show failure/repetition without recovery, '
+        'or current images contradict task_todo progress. Prefer continue_acting when the last result '
         'shows progress, relook just matched, or budget is nearly spent. One short decisive choice.'
     )
     meta = {**META, 'phase': 'spectator_jev_gate', 'signals': list(signals)}
     try:
-        choice, probs, lat = JC.choose(state, instr, _SPECTATOR_CRITERIA, meta=meta)
+        choice, probs, lat = JC.choose(state, instr, _SPECTATOR_CRITERIA, assets=assets, meta=meta)
         defer = choice == 'defer_to_astra'
         detail = {'choice': choice, 'probabilities': probs, 'latency_s': lat, 'signals': list(signals)}
         log(dec=dec, t=T[0], spectator_jev=True, defer=defer, **{k: detail[k] for k in ('choice', 'signals', 'latency_s')})
@@ -2620,6 +2685,12 @@ try:
         raise RuntimeError(f"episode_start_plan_failed:{START_PLAN_OUT['error']}")
     intents = {i['name']: i for i in LIB['intents']}
     while T[0] < HORIZON and not DONE[0] and dec < MAX_DEC:
+        if EP.get('todo_review_due'):
+            _review_task_todo(EP.pop('todo_review_due'))
+        if EP['closed'] and not any(contacts()):
+            EP['grasp_confirm'] = False
+            EP['grasp_secured_once'] = False
+            PER['seen_held'] = False
         trig = fb_trigger()
         if trig:  # early perception-and-Codex recovery: episode-only re-perception (never edits the library)
             P['fb'] += 1; r, pt = do_fallback(trig); fb_events.append({'dec': dec, 'trigger': trig, 'result': r, 'patch': pt})
@@ -2689,20 +2760,19 @@ try:
                     tcp=list(np.asarray(ns['tcp'], float).round(4)))
             except Exception:
                 pass
-        # Deadlock guard: if identity unconfirmed and relook budget gone, never ask Jev for close_gripper.
-        if forced is None and (not goal_id_confirmed()) and P['relook'] >= MAX_RELOOK:
-            menu = {k: v for k, v in intents.items() if k != 'close_gripper'}
-            if not menu: menu = intents
-            it, probs, _ = JC.choose(JX.jev_choose_state(LANG, f, LIB, ns=ns, uses=EP.get('uses'), episode_lessons=FB_LESSONS, episode_start_plan=EP.get('start_plan'), dsl=dsl),
-                                     JX.jev_choose_instructions(LIB, extra='Do NOT select close_gripper until goal identity is confirmed; prefer ask_astra, relook, move_above_object, or reopen_and_retry.'),
-                                     {k: v['definition'] for k, v in menu.items()}, meta=META); jev_calls += 1
-        elif forced: it, probs = forced, None
+        if forced:
+            it, probs = forced, None
         else:
-            it, probs, _ = JC.choose(JX.jev_choose_state(LANG, f, LIB, ns=ns, uses=EP.get('uses'), episode_lessons=FB_LESSONS, episode_start_plan=EP.get('start_plan'), dsl=dsl),
-                                     JX.jev_choose_instructions(LIB),
-                                     {k: v['definition'] for k, v in intents.items()}, meta=META); jev_calls += 1
+            state, assets = _jev_input()
+            menu = {k: v for k, v in intents.items()
+                    if k != 'close_gripper' or goal_id_confirmed()}
+            it, probs, _ = JC.choose(state, JO.INSTRUCTIONS,
+                                     JO.candidate_definitions(menu), assets=assets, meta=META)
+            jev_calls += 1
         CUR['intent'] = it; r = execute(it, ns); dec += 1
         EP['last_result'] = r
+        if it in ASK_ASTRA_NAMES or it in ('relook', 'retreat') or r in FAIL_RESULTS or 'empty' in str(r):
+            EP['todo_review_due'] = f'{it}:{r}'
         EP['n_same'] = EP['n_same'] + 1 if it == EP['prev'] else 1; EP['prev'] = it; EP['step'] += 1
         EP['hist'].append(it); EP['tcp_hist'].append(eef())
         EP['result_hist'].append(r); EP['grip_hist'].append(bool(EP['closed']))
@@ -2715,7 +2785,7 @@ try:
         # grip change clears stage-fail streak debounce so a later stuck phase can fire again
         if len(EP['grip_hist']) >= 2 and EP['grip_hist'][-1] != EP['grip_hist'][-2]:
             EP['stage_fail_mark'] = 0
-        log(dec=dec, t=T[0], intent=it, forced=forced, result=r, facts=f)
+        log(dec=dec, t=T[0], intent=it, forced=forced, result=r, facts=f, probabilities=probs)
         # Codex planning help: ask_astra already ran sync in execute; else hard-force; else spectator gate; else normal slow-think
         if r != 'finish' and not DONE[0] and T[0] < HORIZON:
             skip = {'rate_limited', 'skip_at_target', 'skip_finish', 'disabled', 'done', 'slow_cap', 'async_busy',
@@ -2767,6 +2837,9 @@ try:
 except Exception:
     import traceback; end = 'harness_error'; res['error'] = traceback.format_exc()[-1200:]
 _finalize_slow_jobs()
+if DONE[0] and EP.get('task_todo'):
+    EP['task_todo'] = TODO.official_completion(EP['task_todo'], T[0])
+    _save_task_todo('official_success')
 # diagnostic: which sim body moved most (never shown to policy)
 moved_most = None
 try:
@@ -2783,6 +2856,7 @@ res.update(success=bool(DONE[0]), end_reason=end, env_steps=T[0], decisions=dec,
            astra_cost_usd=round(P['astra_cost'], 4), planning_calls=P['planning_calls'],
            planning_cost_usd=round(P['planning_cost'], 4), relooks=P['relook'], fallback_events=fb_events, slow_think_events=slow_events,
            slow_interventions=P['slow'], gate_jev_calls=EP.get('gate_jev_calls', 0), final_patch=PATCH, fallback_lessons=FB_LESSONS, learned_shape=RSHAPE,
+           task_todo=EP.get('task_todo'), todo_review_calls=EP.get('todo_calls', 0),
            start_identity=START_ID, identity_events=ID_EVENTS, goal_id=GOAL_ID, goal_target=GOAL_TARGET,
            close_refusals=GOAL_ID.get('close_refusals', 0), moved_most=moved_most, wall_s=round(time.time() - t0, 1),
            place_force_release=bool(EP.get('place_force_release')),
