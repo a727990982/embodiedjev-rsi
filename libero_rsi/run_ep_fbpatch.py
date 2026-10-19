@@ -22,6 +22,7 @@ After close_gripper: proprio+lift grasp confirm (log grasp_confirm); secured →
 Hard local-deadend rule: repeated local stall family (push_aside/clear_reapproach/raise_redescend/lateral) without progress, or push_aside episode/approach cap → retreat + global front relook + SYNCHRONOUS slow-think replan (Codex slow-think); Jev motion held until plan applied.
 Place-phase: after carry_to_place reached, N consecutive lower_to_place stall/timeout (MAX_PLACE_LOWER_STALL) or M lift↔lower cycles (MAX_PLACE_LIFT_LOWER_CYCLES) while TCP/held XY is over the place region → force open_gripper (log place_force_release); avoid endless lift↔lower thrash over basket.
 Freshness/isolation: each async slow-think job has a unique job_id + private result_box (abandoned workers cannot overwrite a newer job); after keypoint refresh, close is blocked until TCP re-approaches the new grasp XY; recovery mutations recompute namespace/facts before execute and spectator.
+Pose menu is default-off. POSE_MENU=1 injects in-place yaw, side/top align, and return-home into the loaded library (POSE_MENU_KINDS filters families). libs/ee_pg_pose_menu_lib.json is the same menu. Motion uses servo. Outcomes are observed_facts.pose_action_outcome.
 """
 import os, sys, json, time, gc, re, threading, queue
 os.environ.setdefault('MUJOCO_GL', 'egl'); os.environ.setdefault('PYOPENGL_PLATFORM', 'egl')
@@ -98,7 +99,122 @@ def _ensure_ask_astra_intents(lib):
     instr = lib.get('intent_instructions', '') or ''
     if 'ask_astra' not in instr:
         lib['intent_instructions'] = instr + tip
+
+def _pose_menu_enabled():
+    return os.environ.get('POSE_MENU', '0').strip().lower() not in ('', '0', 'false', 'off', 'no')
+
+def _pose_menu_kinds():
+    """None means do not filter. A set limits which pose families stay in the menu."""
+    raw = os.environ.get('POSE_MENU_KINDS', '').strip()
+    if not raw:
+        return None
+    return frozenset(part.strip() for part in raw.split(',') if part.strip())
+
+def _pose_kind_of(it):
+    pose = (it or {}).get('pose')
+    if pose in ('rotate', 'rotate_toward_astra'):
+        return 'rotate'
+    if pose == 'align':
+        return 'align'
+    if pose == 'home':
+        return 'home'
+    return None
+
+def _pose_menu_intent_specs():
+    """Discrete pose-menu intents. Degrees in the text are dimensionless; clearances stay in the harness."""
+    specs = []
+
+    def add(name, pose, definition, **extra):
+        specs.append({
+            'id': f'{name}@v1', 'name': name, 'action': 'pose_menu', 'pose': pose, 'fingers': 'keep',
+            'definition': definition, 'status': 'hypothesis', 'evidence': 'pose menu', **extra,
+        })
+
+    add('rotate_yaw_plus_15', 'rotate',
+        'Hold position and rotate gripper yaw by 15 degrees positive about vertical.', yaw_delta_deg=15)
+    add('rotate_yaw_minus_15', 'rotate',
+        'Hold position and rotate gripper yaw by 15 degrees negative about vertical.', yaw_delta_deg=-15)
+    add('rotate_yaw_plus_45', 'rotate',
+        'Hold position and rotate gripper yaw by 45 degrees positive about vertical.', yaw_delta_deg=45)
+    add('rotate_yaw_minus_45', 'rotate',
+        'Hold position and rotate gripper yaw by 45 degrees negative about vertical.', yaw_delta_deg=-45)
+    add('rotate_yaw_toward_astra', 'rotate_toward_astra',
+        'Hold position and rotate gripper yaw by 15 degrees toward the estimated grasp yaw.', yaw_step_deg=15)
+    for side in ('top', 'left', 'right', 'front', 'back'):
+        for clearance in ('small', 'medium', 'large'):
+            if side == 'top':
+                definition = (
+                    f'Move to the top of the target object at {clearance} clearance, '
+                    'using the grasp point, object top centre, and object height estimates.'
+                )
+            else:
+                definition = (
+                    f'Move to the {side} of the target object at {clearance} clearance. '
+                    'Keep the current height and face the gripper toward the object. '
+                    'Uses the grasp point, object top centre, and object height estimates.'
+                )
+            add(f'align_{side}_{clearance}', 'align', definition, side=side, clearance=clearance)
+    add('return_home', 'home',
+        'Return to the initial end-effector pose for recovery. Finger command stays as it is.')
+    return specs
+
+def _pose_menu_tip(lib):
+    kinds = {_pose_kind_of(i) for i in lib.get('intents', []) if i.get('action') == 'pose_menu'}
+    parts = []
+    if 'rotate' in kinds:
+        parts.append('rotate the gripper in place by 15 or 45 degrees, or by 15 degrees toward the estimated grasp yaw')
+    if 'align' in kinds:
+        parts.append('align to the top, left, right, front, or back of the target at a small, medium, or large clearance')
+    if 'home' in kinds:
+        parts.append('return to the home pose')
+    if not parts:
+        return ''
+    return (
+        ' Pose menu: you may ' + '; or '.join(parts) +
+        '. In-place rotation holds position. Side alignments keep the current height and turn the gripper toward the object. '
+        'Read pose_action_outcome before repeating one.'
+    )
+
+def _pose_menu_visible():
+    if _pose_menu_enabled():
+        return True
+    try:
+        return any(i.get('action') == 'pose_menu' for i in LIB.get('intents', []))
+    except Exception:
+        return False
+
+def _install_pose_menu(lib):
+    """Inject pose intents when POSE_MENU=1, then apply POSE_MENU_KINDS. Default env: no change."""
+    changed = False
+    if _pose_menu_enabled():
+        names = {i['name'] for i in lib.get('intents', [])}
+        fin_i = next((i for i, it in enumerate(lib['intents']) if it['name'] == 'finish'), len(lib['intents']))
+        for spec in _pose_menu_intent_specs():
+            if spec['name'] in names:
+                continue
+            lib['intents'].insert(fin_i, dict(spec))
+            fin_i += 1
+            names.add(spec['name'])
+            changed = True
+    kinds = _pose_menu_kinds()
+    if kinds is not None:
+        kept = []
+        for it in lib.get('intents', []):
+            if it.get('action') == 'pose_menu' and _pose_kind_of(it) not in kinds:
+                changed = True
+                continue
+            kept.append(it)
+        lib['intents'] = kept
+    instr = lib.get('intent_instructions', '') or ''
+    tip = _pose_menu_tip(lib)
+    if tip and 'Pose menu:' not in instr:
+        lib['intent_instructions'] = instr + tip
+        changed = True
+    return changed
+
 _ensure_ask_astra_intents(LIB)
+if _install_pose_menu(LIB):
+    validate(LIB)
 ep_dir = os.path.join(OUT, f'{suite}_t{tid}_i{init_i}'); os.makedirs(ep_dir, exist_ok=True)
 logf = open(os.path.join(ep_dir, 'decisions.jsonl'), 'w')
 def log(**k): logf.write(json.dumps(k, default=lambda o: np.asarray(o).round(4).tolist()) + '\n'); logf.flush()
@@ -470,7 +586,9 @@ eef = lambda: obs['robot0_eef_pos'].copy()
 opening = lambda: float(obs['robot0_gripper_qpos'][0] - obs['robot0_gripper_qpos'][1])
 yaw_now = lambda: Rot.from_quat(obs['robot0_eef_quat']).as_euler('xyz')[2]
 YAW0 = yaw_now(); Q0 = Rot.from_quat(obs['robot0_eef_quat'])
+HOME_EEF = eef().copy()  # settled pose before decisions; return_home servos here
 EP = {'closed': False, 'n_same': 0, 'prev': 'none', 'step': 0, 'ever_contact': False, 'n_close': 0, 'released': False,
+      'pose_menu_note': None, 'pose_menu_counts': {},
       'tcp_at_close': None, 'opening_at_close': None, 'uses': {}, 'closes': [], 'hist': [], 'tcp_hist': [],
       'result_hist': [], 'grip_hist': [], 'stage_fail_mark': 0,
       'approach_changes': 0, 'escapes': 0, 'escape_looks': 0, 'force_next_intent': None,
@@ -662,10 +780,15 @@ def facts(ns, preds):
          'times_closed': ns['n_close'], 'released_since_close': ns['released'], 'astra_says_object_held': ns['seen_held'],
          'grasp_point_estimate_m': r3(ns['grasp']), 'object_top_centre_estimate_m': r3(ns['objc']), 'place_point_estimate_m': r3(ns['place']),
          'object_height_estimate_m': round(ns['obj_h'], 3), 'previous_intent': ns['prev'], 'decisions_in_previous_intent': ns['n_same'], 'last_intent_result': ns.get('last_result', 'none')}
-    f.update(preds); return f
+    f.update(preds)
+    if _pose_menu_visible():
+        f['pose_action_outcome'] = str(EP.get('pose_menu_note') or 'none')
+    return f
 
-def servo(target, grip, gain=1.0, max_steps=60, tol=.006):
-    last = eef(); stall = 0
+def servo(target, grip, gain=1.0, max_steps=60, tol=.006, ori_tol=None):
+    """Track target position. ori_tol (radians), when set, also requires orientation convergence.
+    Default ori_tol=None keeps the historical position-only reached/stall rule."""
+    last = eef(); stall = 0; prev_ori = None
     pick = lambda pk, sk, d: next((v for v in (PATCH[pk], RSHAPE[sk], SHAPE[sk]) if v is not None), d)
     yw = pick('yaw_deg', 'yaw', PER['yaw']); tl = float(np.clip(pick('tilt_deg', 'tilt', 0), 0, 30)); td = pick('tilt_dir_deg', 'tdir', 0)
     Rt = Rot.from_rotvec(np.deg2rad(tl) * np.array([np.cos(np.deg2rad(td + 90)), np.sin(np.deg2rad(td + 90)), 0])) * Rot.from_euler('z', np.deg2rad(yw)) * Q0
@@ -674,8 +797,16 @@ def servo(target, grip, gain=1.0, max_steps=60, tol=.006):
         d = target - eef(); a = np.zeros(7); a[:3] = np.clip(d / .05 * 1.6, -1, 1) * float(np.clip(gain, .15, 1.0))
         er = (Rt * Rot.from_quat(obs['robot0_eef_quat']).inv()).as_rotvec(); a[3:6] = np.clip(er / .5 * 1.2, -1, 1)
         a[6] = grip; step(a)  # gripper binary open/close (EmbodiedEvo-style)
-        if np.linalg.norm(d) < tol: return 'reached'
-        mv = np.linalg.norm(eef() - last); last = eef(); stall = stall + 1 if mv < .0005 else 0
+        ori_err = float(np.linalg.norm(er))
+        ori_ok = ori_tol is None or ori_err < float(ori_tol)
+        if np.linalg.norm(d) < tol and ori_ok: return 'reached'
+        mv = np.linalg.norm(eef() - last); last = eef()
+        ori_progress = False
+        if ori_tol is not None:
+            if prev_ori is not None and (prev_ori - ori_err) > 0.002:
+                ori_progress = True
+            prev_ori = ori_err
+        stall = stall + 1 if (mv < .0005 and not ori_progress) else 0
         if stall >= 8: return 'stalled'
     return 'timeout'
 def grip(g, n):
@@ -1631,9 +1762,194 @@ def do_relook(reason):
         return 'relooked_matched' if matched else 'relooked_unmatched'
     except Exception as e: return 'relook_error'
 
+def _wrap_deg(angle):
+    return float((float(angle) + 180.0) % 360.0 - 180.0)
+
+def _yaw_step(current, delta):
+    current = _wrap_deg(current)
+    step = float(delta)
+    if abs(step) < 0.5:
+        return current, 0.0
+    return _wrap_deg(current + step), step
+
+def _yaw_toward(current, target, step_deg):
+    """Step at most step_deg along the short arc from current toward target."""
+    current = _wrap_deg(current)
+    delta = _wrap_deg(float(target) - current)
+    step = float(np.clip(delta, -abs(float(step_deg)), abs(float(step_deg))))
+    if abs(step) < 0.5:
+        return current, 0.0
+    return _wrap_deg(current + step), step
+
+def _unit_xy(v):
+    v = np.asarray(v, float).reshape(-1)[:2]
+    n = float(np.linalg.norm(v))
+    if n < 1e-6:
+        return None
+    return v / n
+
+def _object_side_dirs(objc_xy, home_xy, cam_xy=None):
+    """Front is from the object toward the initial gripper (robot side). Left is 90 deg CCW of front."""
+    front = _unit_xy(np.asarray(home_xy, float) - np.asarray(objc_xy, float))
+    if front is None and cam_xy is not None:
+        front = _unit_xy(np.asarray(cam_xy, float) - np.asarray(objc_xy, float))
+    if front is None:
+        front = np.array([0.0, -1.0])
+    left = np.array([-front[1], front[0]])
+    return {'front': front, 'back': -front, 'left': left, 'right': -left}
+
+def _pose_body_radius(grasp, objc, obj_h):
+    """Horizontal body proxy from the Astra grasp point, object top centre, and object height."""
+    grasp = np.asarray(grasp, float).reshape(3)
+    objc = np.asarray(objc, float).reshape(3)
+    radial = float(np.linalg.norm(grasp[:2] - objc[:2]))
+    return float(max(radial, 0.5 * abs(float(obj_h))))
+
+def _yaw_face_point(from_xy, to_xy):
+    """Yaw whose forward axis (cos yaw, sin yaw) points at to_xy. Open axis stays perpendicular."""
+    d = _unit_xy(np.asarray(to_xy, float) - np.asarray(from_xy, float))
+    if d is None:
+        return None
+    return _wrap_deg(float(np.degrees(np.arctan2(d[1], d[0]))))
+
+def _pose_clearance_m(name):
+    """Guava align clearances: small 0.05 m, medium 0.08 m, large 0.15 m."""
+    defaults = {'small': 0.05, 'medium': 0.08, 'large': 0.15}
+    env_key = {'small': 'POSE_CLEAR_SMALL_M', 'medium': 'POSE_CLEAR_MEDIUM_M', 'large': 'POSE_CLEAR_LARGE_M'}[name]
+    try:
+        return float(os.environ.get(env_key, defaults[name]))
+    except Exception:
+        return float(defaults[name])
+
+def _align_target(side, clearance_m, tcp, grasp, objc, obj_h, home_xy, cam_xy=None):
+    tcp = np.asarray(tcp, float).reshape(3).copy()
+    objc = np.asarray(objc, float).reshape(3)
+    if side == 'top':
+        tgt = objc.copy()
+        tgt[2] = float(objc[2]) + float(clearance_m)
+        return tgt, None
+    dirs = _object_side_dirs(objc[:2], home_xy, cam_xy)
+    if side not in dirs:
+        raise ValueError(f'unknown side {side}')
+    radius = _pose_body_radius(grasp, objc, obj_h)
+    tgt = tcp.copy()
+    tgt[:2] = objc[:2] + dirs[side] * (radius + float(clearance_m))
+    tgt[2] = float(tcp[2])
+    return tgt, _yaw_face_point(tgt[:2], objc[:2])
+
+def _pose_grip():
+    return 1.0 if EP.get('closed') else -1.0
+
+def _finite3(v):
+    try:
+        a = np.asarray(v, float).reshape(-1)
+        return a.size >= 3 and bool(np.all(np.isfinite(a[:3])))
+    except Exception:
+        return False
+
+def _pose_note(kind, text):
+    EP['pose_menu_note'] = text
+    counts = EP.setdefault('pose_menu_counts', {})
+    counts[kind] = int(counts.get(kind, 0)) + 1
+    try:
+        log(t=T[0], pose_menu=True, kind=kind, outcome=text)
+    except Exception:
+        pass
+    return text
+
+def _execute_pose_menu(it, ns):
+    """Run one pose-menu intent through servo. Does not call a detector."""
+    pose = it.get('pose')
+    kind = _pose_kind_of(it) or 'pose'
+    grip = _pose_grip()
+    if pose in ('rotate', 'rotate_toward_astra'):
+        hold = np.asarray(eef(), float).copy()
+        cur = float(_cmd_yaw_deg())
+        if pose == 'rotate_toward_astra':
+            astra = float(PER.get('yaw', 0.0) or 0.0)
+            new_yaw, step = _yaw_toward(cur, astra, float(it.get('yaw_step_deg', 15)))
+            if abs(step) < 0.5:
+                _pose_note(kind, f'in-place rotate toward Astra yaw {astra:.1f}: already aligned; position held')
+                return 'at_target'
+            label = f'in-place rotate {abs(step):.1f} deg toward Astra yaw {astra:.1f}'
+        else:
+            new_yaw, step = _yaw_step(cur, float(it.get('yaw_delta_deg', 0)))
+            label = f'in-place rotate {step:+.1f} deg'
+        PATCH['yaw_deg'] = float(new_yaw)
+        try:
+            result = servo(hold, grip, 0.6, max_steps=80, tol=0.01, ori_tol=0.08)
+        except Exception as ex:
+            result = f'pose_menu_error:{ex}'
+        _pose_note(kind, f'{label}: commanded yaw {cur:.1f} -> {new_yaw:.1f}; position held; servo {result}')
+        return result
+    if pose == 'align':
+        if not (_finite3(PER.get('grasp')) and _finite3(PER.get('objc')) and np.isfinite(float(PER.get('obj_h', np.nan)))):
+            _pose_note(kind, 'align refused: missing grasp point, object top centre, or object height estimate')
+            return 'pose_menu_no_estimate'
+        side = str(it.get('side') or '')
+        clearance_name = str(it.get('clearance') or 'medium')
+        try:
+            clearance = _pose_clearance_m(clearance_name)
+        except Exception:
+            _pose_note(kind, f'align refused: unknown clearance {clearance_name}')
+            return 'pose_menu_bad_clearance'
+        tcp = np.asarray(ns.get('tcp', eef()), float)
+        try:
+            cam = np.asarray(CP, float).reshape(-1)[:2]
+        except Exception:
+            cam = None
+        try:
+            home_xy = np.asarray(HOME_EEF, float).reshape(-1)[:2]
+        except Exception:
+            home_xy = tcp[:2]
+        try:
+            tgt, yaw = _align_target(side, clearance, tcp, PER['grasp'], PER['objc'], PER['obj_h'], home_xy, cam)
+        except Exception as ex:
+            _pose_note(kind, f'align refused: {ex}')
+            return 'pose_menu_bad_side'
+        if yaw is not None:
+            PATCH['yaw_deg'] = float(yaw)
+        try:
+            result = servo(tgt, grip, 0.8, max_steps=80, tol=0.01, ori_tol=0.08 if yaw is not None else None)
+        except Exception as ex:
+            result = f'pose_menu_error:{ex}'
+        where = 'above object top centre' if side == 'top' else 'height held and gripper yaw faces the object'
+        _pose_note(kind, (
+            f'align {side} clearance {clearance_name} ({clearance:.3f} m): '
+            f'target {[round(float(x), 3) for x in tgt]}; {where}; servo {result}'))
+        return result
+    if pose == 'home':
+        try:
+            home = np.asarray(HOME_EEF, float).reshape(3).copy()
+        except Exception:
+            _pose_note(kind, 'return home refused: initial end-effector pose was not captured')
+            return 'pose_menu_no_home'
+        PATCH['yaw_deg'] = 0.0
+        PATCH['tilt_deg'] = 0.0
+        PATCH['tilt_dir_deg'] = 0.0
+        try:
+            result = servo(home, grip, 1.0, max_steps=80, tol=0.01, ori_tol=0.08)
+        except Exception as ex:
+            result = f'pose_menu_error:{ex}'
+        # Back to the episode-start command: no leftover yaw/tilt override after the arm is home.
+        PATCH['yaw_deg'] = None
+        PATCH['tilt_deg'] = None
+        PATCH['tilt_dir_deg'] = None
+        RSHAPE['yaw'] = None
+        RSHAPE['tilt'] = None
+        RSHAPE['tdir'] = None
+        _pose_note(kind, (
+            f'return home: target {[round(float(x), 3) for x in home]}; '
+            f'initial orientation; yaw/tilt overrides cleared; fingers unchanged; servo {result}'))
+        return result
+    _pose_note(kind, f'pose menu ignored unknown pose {pose}')
+    return 'pose_menu_unknown'
+
 def execute(name, ns):
     it = {i['name']: i for i in LIB['intents']}[name]
     act = it.get('action', 'move'); fing = it.get('fingers', 'keep')
+    if act == 'pose_menu':
+        return _execute_pose_menu(it, ns)
     if act in ASK_ASTRA_NAMES or name in ASK_ASTRA_NAMES:
         return do_ask_astra(f'jev_intent:{name}')
     if act == 'relook': return do_relook('library rule chose relook')
@@ -2787,6 +3103,7 @@ res.update(success=bool(DONE[0]), end_reason=end, env_steps=T[0], decisions=dec,
            close_refusals=GOAL_ID.get('close_refusals', 0), moved_most=moved_most, wall_s=round(time.time() - t0, 1),
            place_force_release=bool(EP.get('place_force_release')),
            place_force_release_reason=EP.get('place_force_release_reason'),
+           pose_menu_counts=dict(EP.get('pose_menu_counts') or {}),
            place_lower_stall_n=int(EP.get('place_lower_stall_n', 0)),
            place_lift_lower_cycles=int(EP.get('place_lift_lower_cycles', 0)))
 json.dump(res, open(os.path.join(ep_dir, 'result.json'), 'w'), indent=1, default=lambda o: np.asarray(o).tolist())
