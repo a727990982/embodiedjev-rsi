@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import coding_agent_slow as CAS
 import jev_experience as JX
+import harness_source
 
 
 def main():
@@ -135,7 +136,7 @@ def main():
     assert 'hp_start_predict_neighbour' in {L.get('id') for L in lib.get('lessons', [])}
 
     # 6) Harness hooks
-    harness = (Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py').read_text()
+    harness = harness_source.read()
     assert '_run_episode_start_plan' in harness
     assert 'start_plan.json' in harness
     assert "'experience_brief': brief" in harness

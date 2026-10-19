@@ -7,11 +7,11 @@ import threading
 import time
 from pathlib import Path
 
-HARNESS = Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py'
+import harness_source
 
 
 def main():
-    src = HARNESS.read_text()
+    src = harness_source.read()
     ast.parse(src)
     for needle in (
         '_next_slow_job_id', '_new_slow_result_box', '_abandon_async_slow',

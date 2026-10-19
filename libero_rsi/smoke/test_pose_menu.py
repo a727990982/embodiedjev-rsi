@@ -15,9 +15,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import motion_feedback as MF
 import validate
-from test_review_regressions import functions
+from test_review_regressions import DEFINED_IN, MODULES, TREES, functions
 
-TREE = ast.parse((ROOT / 'run_ep_fbpatch.py').read_text())
+
+def harness_function(name):
+    module = DEFINED_IN[name]
+    node = next(n for n in TREES[module].body if isinstance(n, ast.FunctionDef) and n.name == name)
+    return node, ast.get_source_segment(MODULES[module].read_text(), node)
+
+
 LIBS = ROOT / 'libs'
 FROZEN = LIBS / 'ee_pg_lib_frozen.json'
 EASY = LIBS / 'ee_pg_easy_v2_lib.json'
@@ -289,15 +295,12 @@ class PoseMenuTests(unittest.TestCase):
             self.assertEqual(state['motion_context']['pose_action_outcome'],ep['pose_menu_note'])
 
     def test_servo_keeps_position_success_unless_orientation_is_requested(self):
-        fn = next(n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name == 'servo')
+        fn, body = harness_function('servo')
         self.assertEqual(fn.args.args[-1].arg, 'ori_tol')
         self.assertIsNone(fn.args.defaults[-1].value)
-        body = ast.get_source_segment((ROOT / 'run_ep_fbpatch.py').read_text(), fn)
-        execute = next(n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name == 'execute')
-        execute_src = ast.get_source_segment((ROOT / 'run_ep_fbpatch.py').read_text(), execute)
+        _, execute_src = harness_function('execute')
         self.assertLess(execute_src.find("act == 'pose_menu'"), execute_src.find("it['refpoint']"))
-        menu = next(n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name == '_execute_pose_menu')
-        menu_src = ast.get_source_segment((ROOT / 'run_ep_fbpatch.py').read_text(), menu)
+        _, menu_src = harness_function('_execute_pose_menu')
         self.assertIn('servo(', menu_src)
         self.assertNotIn('perceive(', menu_src)
         self.assertNotIn('segment', menu_src.lower())

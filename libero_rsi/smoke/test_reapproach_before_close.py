@@ -3,7 +3,7 @@ import ast
 from pathlib import Path
 import numpy as np
 
-HARNESS = Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py'
+import harness_source
 REAPPROACH_XY_M = 0.03
 
 
@@ -46,7 +46,7 @@ def close_allowed(ep, tcp, grasp, goal_id_ok=True, obj_w=0.05):
 
 
 def main():
-    src = HARNESS.read_text()
+    src = harness_source.read()
     ast.parse(src)
     for needle in (
         'need_reapproach', '_mark_reapproach_if_needed', '_tcp_near_grasp',

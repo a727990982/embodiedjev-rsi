@@ -1,10 +1,10 @@
 """Logic smoke: after close, grasp_confirm suppresses push_aside / deadend undo (no MuJoCo)."""
 from pathlib import Path
 
-HARNESS = Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py'
+import harness_source
 
 def main():
-    src = HARNESS.read_text()
+    src = harness_source.read()
     assert 'def _confirm_grasp_after_close' in src
     assert 'grasp_confirm=False' in src or 'grasp_confirm=bool' in src
     assert 'skip_plan_grasp_secured' in src

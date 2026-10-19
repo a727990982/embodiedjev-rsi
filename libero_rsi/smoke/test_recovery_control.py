@@ -1,5 +1,4 @@
 """Exercise rule ownership against real rule-loop and plan-application code."""
-import ast
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -18,17 +17,15 @@ class ControlTests(unittest.TestCase):
         with self.assertRaises(ValueError):RC.parse_mode('jve')
 
     def run_rules(self,mode,rules):
-        tree=ast.parse((ROOT/'run_ep_fbpatch.py').read_text())
-        loop=next(n for n in ast.walk(tree) if isinstance(n,ast.For) and isinstance(n.target,ast.Name) and n.target.id=='rc')
         calls=[];ep={'uses':{},'force_next_intent':None}
-        scope=dict(LIB={'recoveries':[dict(r,trigger='True') for r in rules]},forced=None,
-            dsl=SimpleNamespace(evaluate=lambda *a:True),ns={},dec=0,T=[0],EP=ep,RC=RC,
-            RECOVERY_MODE=mode,intents={'open_gripper':{},'move_above_object':{}},
-            log=lambda **kw:None,_apply_stall_feedback=lambda *a,**kw:calls.append('stall') or {},
+        scope=functions('_apply_recovery_rules',LIB={'recoveries':[dict(r,trigger='True') for r in rules]},
+            dsl=SimpleNamespace(evaluate=lambda *a:True),dec=0,T=[0],EP=ep,RC=RC,
+            RECOVERY_MODE=mode,log=lambda **kw:None,
+            _apply_stall_feedback=lambda *a,**kw:calls.append('stall') or {},
             _apply_relative_approach_change=lambda *a:calls.append('approach'),
             STALL_FB_ACTIONS={'clear_reapproach'})
-        exec(compile(ast.Module(body=[loop],type_ignores=[]),'rule_loop','exec'),scope)
-        return scope['forced'],ep,calls
+        forced,_=scope['_apply_recovery_rules']({},{'open_gripper':{},'move_above_object':{}},None)
+        return forced,ep,calls
 
     def test_skipped_rules_do_not_move_force_or_spend_uses(self):
         for key in ['stall_feedback','approach_change']:

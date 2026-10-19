@@ -15,15 +15,40 @@ import coding_agent_slow as CAS
 import jev_experience as JX
 import task_todo as TODO
 import validate
+from harness.state import Runtime
 
-TREE = ast.parse((ROOT / 'run_ep_fbpatch.py').read_text())
+MODULES = {path.stem: path for path in sorted((ROOT / 'harness').glob('*.py'))}
+TREES = {name: ast.parse(path.read_text()) for name, path in MODULES.items()}
+DEFINED_IN = {node.name: name for name, tree in TREES.items()
+              for node in tree.body if isinstance(node, ast.FunctionDef)}
+RUNTIME_NAMES = frozenset(vars(Runtime()))
+
+
+class _Scope(dict):
+    """Flat test bindings, mirrored to `rt.<name>` and `<module>.<name>` as the harness code refers to them."""
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if key in RUNTIME_NAMES:
+            setattr(self['rt'], key, value)
+        if key in DEFINED_IN:
+            setattr(self[DEFINED_IN[key]], key, value)
 
 
 def functions(*names, **bindings):
-    nodes = [node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name in names]
-    assert len(nodes) == len(names)
-    scope = {'json': json, 'os': __import__('os'), **bindings}
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(ROOT / 'run_ep_fbpatch.py'), 'exec'), scope)
+    """Compile the named harness functions alone, with test doubles for everything they reference."""
+    found = [(DEFINED_IN[name], node) for name in names for node in TREES[DEFINED_IN[name]].body
+             if isinstance(node, ast.FunctionDef) and node.name == name]
+    assert len(found) == len(names)
+    scope = _Scope(json=json, os=__import__('os'))
+    dict.__setitem__(scope, 'rt', SimpleNamespace())
+    for module in MODULES:
+        dict.__setitem__(scope, module, SimpleNamespace())
+    for key, value in bindings.items():
+        scope[key] = value
+    for module, node in found:
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(MODULES[module]), 'exec'), scope)
+        scope[node.name] = dict.__getitem__(scope, node.name)
     return scope
 
 
@@ -205,16 +230,15 @@ class RegressionTests(unittest.TestCase):
         self.assertNotIn('codex_plan', events)
 
     def test_recovery_error_is_logged_and_propagated(self):
-        loop = next(n for n in ast.walk(TREE) if isinstance(n, ast.For)
-                    and isinstance(n.target, ast.Name) and n.target.id == 'rc')
         events = []
         def fail(*args):
             raise ValueError('bad trigger')
-        scope = dict(LIB={'recoveries': [{'id': 'broken', 'trigger': 'bad'}]},
-                     forced=None, dsl=SimpleNamespace(evaluate=fail), ns={}, dec=3, T=[7],
-                     log=lambda **kw: events.append(kw))
+        scope = functions('_apply_recovery_rules',
+                          LIB={'recoveries': [{'id': 'broken', 'trigger': 'bad'}]},
+                          dsl=SimpleNamespace(evaluate=fail), dec=3, T=[7],
+                          log=lambda **kw: events.append(kw))
         with self.assertRaisesRegex(ValueError, 'bad trigger'):
-            exec(compile(ast.Module(body=[loop], type_ignores=[]), '<recovery>', 'exec'), scope)
+            scope['_apply_recovery_rules']({}, {}, None)
         self.assertEqual(events[0]['recovery_error'], 'broken')
 
     def test_all_shipped_libraries_validate(self):

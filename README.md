@@ -5,7 +5,8 @@ Public snapshot of the LIBERO RSI / EmbodiedJev harness. This repo had no prior 
 | Path | Role |
 |---|---|
 | `libero_rsi/coding_agent_slow.py` | Codex CLI transport for start planning, slow-think, Astra perception and identity checks. |
-| `libero_rsi/run_ep_fbpatch.py` | Episode harness: Jev intents, stall feedback, grasp confirm, local-deadend relook, place force-release. Needs LIBERO, MuJoCo, Codex CLI, and the Jev client to actually roll out. |
+| `libero_rsi/run_ep_fbpatch.py` | Command-line entry point for one episode. Needs LIBERO, MuJoCo, Codex CLI, and the Jev client to actually roll out. |
+| `libero_rsi/harness/` | Episode harness package: Jev intents, stall feedback, grasp confirm, local-deadend relook, place force-release. The module map is in `harness/__init__.py`; it can be imported without the simulator. |
 | `libero_rsi/jev_experience.py` | Builds library advice for Astra/Codex planning; cached predicates are not Jev input. |
 | `libero_rsi/jev_todo.py` | Jev completion questions, classification records, and atomic progress updates. |
 | `libero_rsi/task_todo.py` | Task objectives, evidence-backed progress, and active object selection. |

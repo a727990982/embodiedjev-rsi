@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 from test_review_regressions import functions
 
-HARNESS = Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py'
+import harness_source
 
 
 def empty_patch():
@@ -59,7 +59,7 @@ def plan_target_update(id_ok, stallish, has_kp, plan_steps):
 
 
 def main():
-    src = HARNESS.read_text()
+    src = harness_source.read()
     # harness wiring present
     for needle in ('_commit_keypoints', '_reset_patch', '_note_patch_mutation', 'GOAL_TARGET',
                    'forced_target_update', "do_relook(f'{source}:plan')",

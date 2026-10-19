@@ -6,7 +6,7 @@ import ast
 import sys
 from pathlib import Path
 
-HARNESS = Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py'
+import harness_source
 ASK_ASTRA_NAMES = frozenset({'ask_astra', 'consult_astra'})
 FAIL_RESULTS = frozenset({'timeout', 'stalled'})
 MAX_SLOW = 4
@@ -85,7 +85,7 @@ def hybrid_astra_path(
 
 
 def main():
-    src = HARNESS.read_text()
+    src = harness_source.read()
     ast.parse(src)
     for needle in (
         'GATE_JEV', 'GATE_JEV_COOLDOWN',
@@ -96,7 +96,7 @@ def main():
         "source='spectator_jev'",
         'defer_to_astra',
         'continue_acting',
-        'gate_fired',
+        'assist._spectator_gate_eligible(it, rt.dec)',
         '旁观者清',
         'gate_jev_last_dec',
         'gate_jev_calls',

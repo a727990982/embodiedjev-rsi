@@ -4,8 +4,8 @@ import re
 import sys
 from pathlib import Path
 
-HARNESS = Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py'
-sys.path.insert(0, str(HARNESS.parent))
+import harness_source
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import coding_agent_slow as CAS
 
 REQUIRED = (
@@ -21,7 +21,7 @@ REQUIRED = (
 
 
 def main():
-    src = HARNESS.read_text()
+    src = harness_source.read()
     ast.parse(src)
     prompt = CAS.build_prompt({'language_goal': 'put object in basket'})
     for lab in REQUIRED:

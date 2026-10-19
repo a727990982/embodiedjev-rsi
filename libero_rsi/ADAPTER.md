@@ -6,7 +6,7 @@ Run from the repository root:
 python libero_rsi/run_ep_fbpatch.py SUITE TID INIT LIBRARY.json OUTDIR [nofallback]
 ```
 
-`SUITE` is a LIBERO benchmark registry key; `TID` and `INIT` select the task and initial state. The entry point is a top-level script and should not be imported to inspect its helpers.
+`SUITE` is a LIBERO benchmark registry key; `TID` and `INIT` select the task and initial state. The script only calls `harness.episode.main`; the harness modules can be imported (with `libero_rsi/` on `sys.path`) without LIBERO, which is loaded when an episode starts. One episode runs per process: shared state lives in `harness.state`.
 
 ## External dependencies
 
