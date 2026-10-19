@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT))
 import coding_agent_slow as CAS
 
 
-def fake_run(destination, fail_start=False, handoff=False):
+def fake_run(destination, fail_start=False, handoff=False, menus=False):
     events = []
     def module(name, **attrs):
         obj = types.ModuleType(name)
@@ -54,7 +54,7 @@ def fake_run(destination, fail_start=False, handoff=False):
             self.parsed_problem = {'goal_state': []}
         def seed(self, seed): pass
         def reset(self): pass
-        def _check_success(self): return not handoff and self.count >= 18
+        def _check_success(self): return not handoff and self.count >= (38 if menus else 18)
         def observation(self):
             return {'agentview_image': np.zeros((512,512,3), dtype=np.uint8),
                     'agentview_depth': np.ones((512,512,1)) * .5,
@@ -75,7 +75,7 @@ def fake_run(destination, fail_start=False, handoff=False):
     module('libero.libero.envs', OffScreenRenderEnv=FakeEnv)
     module('robosuite'); module('robosuite.utils', camera_utils=types.SimpleNamespace(get_real_depth_map=lambda sim, depth: depth))
     module('scipy'); module('scipy.spatial'); module('scipy.spatial.transform', Rotation=Rotation)
-    choices = iter(['finish'] * 3 if handoff else ['ask_astra', 'relook', 'retreat'])
+    choices = iter(['fine_x_plus_5mm','rotate_yaw_plus_15','retreat'] if menus else (['finish'] * 3 if handoff else ['ask_astra', 'relook', 'retreat']))
     active_targets = []
     def choose(state, instruction, criteria, **kwargs):
         assert kwargs.get('assets'), 'Jev must receive real image assets'
@@ -144,6 +144,7 @@ def fake_run(destination, fail_start=False, handoff=False):
     library.write_text(json.dumps(lib))
     def exit_process(code): raise SystemExit(code)
     env = {'HORIZON': '20', 'MAX_DEC': '3', 'GATE_JEV': '0', 'SLOW_MIN_GAP_S': '0', 'VIDEO': ''}
+    if menus: env.update(FINE_STEPS='1',POSE_MENU='1',JEV_RECOVERY_MENU='jev',HORIZON='40')
     with patch.dict(os.environ, env, clear=True), patch.object(CAS, 'call_codex', side_effect=codex), \
          patch.object(sys, 'argv', ['run_ep_fbpatch.py','fake_suite','0','0',str(library),destination]), \
          patch.object(os, '_exit', side_effect=exit_process):
@@ -157,9 +158,10 @@ def fake_run(destination, fail_start=False, handoff=False):
 
 
 class RuntimeChainTests(unittest.TestCase):
-    def run_scenario(self, fail_start, handoff=False):
+    def run_scenario(self, fail_start, handoff=False, menus=False):
         with tempfile.TemporaryDirectory() as temp:
             args = [sys.executable, __file__, '--fake-run', temp]
+            if menus: args.append('--menus')
             if fail_start: args.append('--fail-start')
             if handoff: args.append('--handoff')
             run = subprocess.run(args, capture_output=True, text=True, timeout=20)
@@ -203,6 +205,16 @@ class RuntimeChainTests(unittest.TestCase):
         # At the cap, review only; no relocalization/motion after final review.
         self.assertEqual(events[-2:], ['jev:todo_review', 'env_closed'])
 
+    def test_fine_pose_and_jev_control_together_use_current_payload(self):
+        run,result,events=self.run_scenario(False,menus=True)
+        self.assertEqual(run.returncode,0,run.stderr)
+        self.assertNotEqual(result['end_reason'],'harness_error',result.get('error'))
+        self.assertEqual(result['recovery_control'],'jev')
+        self.assertTrue(result['fine_steps_enabled'])
+        self.assertEqual(len(result['fine_step_events']),1)
+        self.assertEqual(result['pose_menu_counts']['rotate'],1)
+        self.assertIn('jev:todo_review',events)
+
     def test_start_plan_failure_does_not_enter_jev_loop(self):
         run, result, events = self.run_scenario(True)
         self.assertEqual(run.returncode, 1)
@@ -214,5 +226,5 @@ class RuntimeChainTests(unittest.TestCase):
 
 if __name__ == '__main__':
     if '--fake-run' in sys.argv:
-        raise SystemExit(fake_run(sys.argv[2], '--fail-start' in sys.argv, '--handoff' in sys.argv))
+        raise SystemExit(fake_run(sys.argv[2], '--fail-start' in sys.argv, '--handoff' in sys.argv, '--menus' in sys.argv))
     unittest.main()

@@ -240,3 +240,16 @@ outcomes appear in `motion_context.pose_action_outcome`. A failed home action
 retains its attempted command overrides instead of claiming the home pose was
 reached. Empty-hand fine/pose motion after release preserves placement review;
 Jev still verifies final placement and whether another grasp is necessary.
+
+## Recovery decision ownership
+
+The existing recovery menu and motion/identity/grasp safeguards remain unchanged.
+`JEV_RECOVERY_MENU=both` (default) retains current automatic recovery rules.
+`JEV_RECOVERY_MENU=jev` skips library `stall_feedback` / `approach_change` rules
+before they spend a use counter, move the arm or force an intent. It also disables
+host-inserted stall steps/chooser calls when an Astra plan lacks a recovery step.
+Explicit Astra plan steps still execute. Identity-deadlock escape, local-deadend
+limits, no-progress diagnosis and grasp/release guards remain active, so this is
+control of routine automatic rules, not an unguarded or exclusively Jev policy.
+`motion_context.recovery_control` and `result.json.recovery_control` record the mode.
+This PR adds no duplicate action library, outcome format or alternate observation path.

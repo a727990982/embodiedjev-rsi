@@ -47,7 +47,7 @@ class CallChainAuditTests(unittest.TestCase):
     def test_requested_relook_performs_perception(self):
         calls = []
         state = {'confirmed': False}
-        scope = functions('_apply_episode_plan', 'identity_fields', np=np,
+        scope = functions('_apply_episode_plan', 'identity_fields', np=np, AUTO_RECOVERY_RULES=True,
             EP={'closed': False, 'last_result': 'reached'}, LIB={'intents': []},
             PATCH={}, GOAL_TARGET={}, NEIGHBOUR_STALL_ISSUES=set(), T=[1],
             _reset_patch=lambda **kw: None,
@@ -66,7 +66,7 @@ class CallChainAuditTests(unittest.TestCase):
         def apply_plan(*args, **kwargs):
             budget['relook'] += 1  # actual perception owns this budget
             return ['relook:relooked_matched']
-        scope = functions('_finish_slow', 'identity_fields', P=budget, EP={'closed': False},
+        scope = functions('_finish_slow', 'identity_fields', AUTO_RECOVERY_RULES=True, P=budget, EP={'closed': False},
             MAX_SLOW=4, MAX_RELOOK=4, FB_LESSONS=[], ID_EVENTS=[], PATCH={}, CUR={}, T=[1], dec=0,
             _account_slow_rec=lambda rec: None, _apply_episode_plan=apply_plan,
             Image=SimpleNamespace(fromarray=lambda image: SimpleNamespace(save=lambda path: None)),

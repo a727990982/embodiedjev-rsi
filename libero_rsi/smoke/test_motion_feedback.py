@@ -177,7 +177,7 @@ class MotionTests(unittest.TestCase):
     def test_reserved_diagnosis_can_apply_after_general_cap_without_extending_it(self):
         calls=[];p={'slow':4,'planning_calls':4}
         with tempfile.TemporaryDirectory() as temp:
-            scope=functions('_finish_slow',P=p,MAX_SLOW=4,EP={'closed':False},
+            scope=functions('_finish_slow',AUTO_RECOVERY_RULES=True,P=p,MAX_SLOW=4,EP={'closed':False},
                 _account_slow_rec=lambda rec:None,identity_fields=lambda parsed:{'matched_language_goal':True},
                 FB_LESSONS=[],ID_EVENTS=[],Image=Image,ep_dir=temp,dec=8,T=[100],PATCH={},CUR={},
                 _apply_episode_plan=lambda *a,**kw:calls.append(a) or ['clear_reapproach'])

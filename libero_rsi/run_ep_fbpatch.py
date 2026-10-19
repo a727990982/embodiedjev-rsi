@@ -36,6 +36,7 @@ import task_todo as TODO
 import jev_todo as JT
 import motion_feedback as MF
 import fine_steps as FS
+import recovery_control as RC
 import numpy as np
 import dsl_libero as dsl
 from validate import validate
@@ -70,6 +71,8 @@ MOTION_RECOVERIES = frozenset({'back_off', 'clear_reapproach', 'change_approach_
 FAIL_RESULTS = frozenset({'timeout', 'stalled', GRASP_FAILED, CLOSE_NOT_READY} |
                          {f'{name}_not_executed:grasp_unconfirmed' for name in TRANSPORT_INTENTS})
 OPEN_MAX = 0.08  # Panda gripper spec (robot spec, not scene)
+RECOVERY_MODE = RC.parse_mode(os.environ.get('JEV_RECOVERY_MENU'))
+AUTO_RECOVERY_RULES = RECOVERY_MODE == 'both'
 FINE_STEPS = FS.enabled_flag()
 LIB = json.load(open(LIBP))
 if FINE_STEPS:
@@ -969,6 +972,7 @@ def _motion_context():
     return {'current_robot_contacts': robot_contacts(), 'last_motion': EP.get('last_motion'),
             'last_failed_motion': EP.get('last_failed_motion'),
             'recovery_validation': _recovery_context(),
+            'recovery_control': RECOVERY_MODE,
             'close_position_check': MF.grasp_position(eef().tolist(), ns['grasp'].tolist(), ns['obj_w'], ns['obj_h']),
             'blocked_intents': list(EP.get('blocked_motions', {})),
             'slow_help_remaining': max(0, MAX_SLOW - P['slow']),
@@ -2487,7 +2491,7 @@ def _apply_episode_plan(p, dep, source='slow'):
         p['plan'] = [{'step': 'relook'}] + [st for st in (p.get('plan') or []) if st.get('step') not in ('adjust', 'raise_redescend', 'lateral_recenter', 'change_approach_yaw', 'confirm_contact', 'clear_reapproach', 'push_aside')]
         _reset_patch(reason=f'{source}_id_bad')
         set_goal_id(False, f'{source}_id_bad', {'is_goal_object': igo_n, 'matched_language_goal': mlg, 'issue': issue})
-    elif stall_issue and mlg is True:
+    elif stall_issue and mlg is True and AUTO_RECOVERY_RULES:
         # Keep goal identity; ensure plan has a non-relook feedback step.
         plan = list(p.get('plan') or [])
         stall_ok = ('raise_redescend', 'lateral_recenter', 'change_approach_yaw', 'confirm_contact', 'clear_reapproach', 'push_aside', 'adjust')
@@ -2543,7 +2547,7 @@ def _apply_episode_plan(p, dep, source='slow'):
             done_steps.append(f"relook:{do_relook(f'{source}:plan')}")
             return done_steps
     # Stall + identity confirmed ⇒ shared target MUST change (raise/shift/relook-refresh). Empty relook-only forbidden.
-    if id_ok and stallish and not target_updated:
+    if id_ok and stallish and not target_updated and AUTO_RECOVERY_RULES:
         try:
             ns_fb, _ = namespace()
             det = _apply_stall_feedback(ns_fb, f'{source}:forced_target_update')
@@ -2765,7 +2769,7 @@ def _finish_slow(parsed, rec, dep, both, intent, result, mode, crit, snap_dec):
     elif stall_issue:
         parsed['intervene'] = True
         plan = list(parsed.get('plan') or [])
-        if not any(st.get('step') in ('raise_redescend', 'lateral_recenter', 'change_approach_yaw', 'confirm_contact', 'clear_reapproach', 'push_aside', 'adjust', 'relook') for st in plan):
+        if AUTO_RECOVERY_RULES and not any(st.get('step') in ('raise_redescend', 'lateral_recenter', 'change_approach_yaw', 'confirm_contact', 'clear_reapproach', 'push_aside', 'adjust', 'relook') for st in plan):
             if issue == 'empty_grasp':
                 _def = 'raise_redescend'
             elif issue == 'blocked_by_neighbour' and goal_id_confirmed():
@@ -3333,6 +3337,8 @@ try:
                 max_u = int(rc.get('max_uses', 3 if 'force_intent' in rc else 1))
                 if not trig_ok or uses >= max_u:
                     continue
+                if RC.skip_rule(rc, RECOVERY_MODE):
+                    continue
                 # Fire once: optional multi-action stall feedback / approach change + shape + force_intent.
                 EP['uses'][rc['id']] = uses + 1
                 if rc.get('stall_feedback'):
@@ -3505,6 +3511,7 @@ if VID:
     video_rc = VID.wait()
     res['video_path'] = VIDP
     res['video_exit_code'] = video_rc
+res['recovery_control'] = RECOVERY_MODE
 if _pose_menu_visible():
     res['pose_menu_counts'] = dict(EP.get('pose_menu_counts') or {})
 if FINE_STEPS or EP.get('fine_step_events'):
