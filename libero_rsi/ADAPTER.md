@@ -59,6 +59,16 @@ past outcomes, not current scene truth. Todo progress retains the sensor-refresh
 grasp flag. Cached visual held estimates, library predicates and simulator object
 poses are not included in policy input.
 
+Acting requests include `grasp_experience`, up to three curated hypotheses with
+conditions, interpretation, possible responses, verification criteria and source
+references. Matching uses only existing policy-visible signals, fresh active-target
+checkpoints and actions since the last target switch. Old failed-motion images
+and startup predictions do not alone trigger a match. Advice is logged with the
+observation and does not add/filter/reorder candidates, force actions, call a model
+or step the environment. Jev chooses among the existing candidates. Spectator and
+todo-review requests omit this action advice. These curated entries are separate
+from Astra/Codex's library brief and are not automatically learned across episodes.
+
 Close requires XY and height proximity to the effective visual grasp estimate
 (including episode offsets). Tolerances are 10–15mm scaled by estimated dimensions,
 allowing controller/vision error while rejecting an above-target close. Position

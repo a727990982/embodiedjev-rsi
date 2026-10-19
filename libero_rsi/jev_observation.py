@@ -7,6 +7,7 @@ import uuid
 
 from PIL import Image
 import task_todo
+from grasp_experience import build as grasp_experience
 
 FIELDS = ('gripper_xyz_m', 'gripper_orientation_xyzw', 'finger_joint_positions_m',
           'fingers_opening_m', 'gripper_closed_command',
@@ -33,6 +34,9 @@ INSTRUCTIONS = (
     'acquire a new grasp by repeating close. Recover from empty, slipped or wrong-object grasps. '
     'The active todo identifies the requested object; do not confuse another task object with it. '
     'Only official_success proves the whole task has succeeded.'
+    ' grasp_experience contains conditional advice matched to current signals, not diagnoses '
+    'or prescribed actions. Check it against current images and use its verification criteria '
+    'to assess the outcome; you still choose among the offered candidates.'
     ' Candidate execution descriptions separate definite program operations from conditional '
     'effects and unverified physics. Commanded targets are visual-estimate controller goals, '
     'not observed future states. Evaluate the alternatives yourself; no candidate is prescribed.'
