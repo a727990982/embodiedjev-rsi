@@ -12,29 +12,64 @@ python libero_rsi/run_ep_fbpatch.py SUITE TID INIT LIBRARY.json OUTDIR [nofallba
 
 The rollout needs a working LIBERO installation (BDDL files, initial states and simulation assets), its compatible MuJoCo/robosuite stack, NumPy, SciPy, Pillow, and a working offscreen rendering backend. The script defaults to EGL. This repository does not pin or provide a validated simulator installation.
 
-The external Jev adapter is not included. Supply its directory via `PYTHONPATH`, or place the modules under `libero_rsi/bench_common/`. Its actual service configuration and credentials belong to that external installation.
+The repository includes the TypeSafe Jev client in `jev_choice.py`. Set
+`TYPESAFE_API_KEY` in the runtime environment. The model is pinned to
+`jev-1.14.0`; requests use `https://api.typesafe.ai/v1/systemone` with base64 image
+assets and `TypeSafe-Danger-Zone-Images: true`. Keys are not stored in source or
+request logs. This API returns choice probabilities, not raw model logits.
 
-| Adapter API used by the harness | Required behavior |
+| Adapter API | Behavior |
 |---|---|
-| `jev_choice.choose(state, instructions, criteria, meta=...)` | Return `(choice, probabilities, latency)`, where `choice` is a key of `criteria`. Used for both acting and spectator decisions. |
+| `jev_choice.choose(state, instructions, criteria, assets=..., meta=...)` | Returns `(choice, probabilities, latency)`; requires current image assets and rejects a wrong model or invalid candidate/probability reply. |
 
-No `astra_client` module is required. Planning, slow-think, visual perception and identity verification all invoke Codex CLI. Perception uses the Astra model (`gpt-6-astra`); Jev decisions still use `jev_choice`. Async Codex planning can overlap main-thread Codex perception calls. External Jev implementation and service budgets are not supplied or verified here.
+No external `jev_choice` or `astra_client` is loaded. Astra via Codex CLI writes
+the episode-start todo and provides perception, identity verification and todo
+progress review. Codex CLI also runs sync/async slow-think; Jev chooses per-step
+intents. There is no dual mode, mock backend or text-only image fallback.
 
-Production roles are fixed: Codex performs start planning and slow-think, Astra via Codex CLI provides visual perception and identity checks, and Jev chooses intents. The old `CODING_AGENT_SLOW`, `EPISODE_START_PLAN`, and `CODING_AGENT_PERCEIVE` environment switches are no longer used. There is no dual mode or direct Astra-client fallback.
-
-Codex requires its CLI and configured authentication. Configure the planning model and effort with `CODING_AGENT_CODEX_MODEL` and `CODING_AGENT_CODEX_EFFORT`, and the executable with `CODING_AGENT_CODEX_BIN`. Perception and marked-grasp identity verification explicitly use `gpt-6-astra` with `ASTRA_EFFORT` (default `xhigh`), independently of the planning-model override. There is no mock backend. Offline tests inject fixed replies at the CLI boundary; they do not demonstrate visual capability.
+Codex requires its CLI and configured authentication. Configure the slow-think model and planning effort with `CODING_AGENT_CODEX_MODEL` and `CODING_AGENT_CODEX_EFFORT`, and the executable with `CODING_AGENT_CODEX_BIN`. Perception and marked-grasp identity verification explicitly use `gpt-6-astra` with `ASTRA_EFFORT` (default `xhigh`), independently of the slow-think model override. Start planning/todo and todo reviews also pin Astra; they use the planning effort. There is no mock backend. Offline tests inject fixed replies at the CLI boundary; they do not demonstrate visual capability.
 
 For early recovery the harness abandons pending advice, refreshes keypoints/identity using Astra through Codex CLI, and calls synchronous Codex planning. A perception failure stops that recovery attempt; a Codex failure is recorded without invoking a separate client or substituting a mock result. Existing help-intent labels (`ask_astra`, `consult_astra`, `defer_to_astra`) keep their names in libraries/logs but route to Codex planning.
 
-## Policy-visible inputs
+## Jev inputs and todo lifecycle
 
-- End-effector position, finger joint opening, last gripper command and action history.
-- One contact boolean per finger, with no contacted-object identity, pose or force.
-- RGB-D perception: image keypoints backprojected through the camera calibration and depth; language-target identity assertions from perception/verification.
-- Official binary success, which terminates the episode.
-- Library predicates, recoveries and qualitative lessons, plus episode-local corrections.
+`_current_observation` captures front RGB, optional wrist RGB, end-effector
+position/orientation, finger joint positions/opening, commanded open/closed state
+and individual contact booleans from one simulation step. `_jev_input` adds the
+language goal, todo and official success, encodes image assets and logs matching
+frames. Contact flags never identify the touched object.
 
-The start planner cannot elevate the identity gate. An unverified target queues `relook`; planning statements such as “blocked by neighbour” do not authorize closing or pushing.
+Neither acting nor spectator Jev gets cached grasp/place coordinates, `seen_held`,
+geometry-derived predicates, predicate meanings or active recovery matches.
+Spectator additionally gets actual recent intent/result events and help budgets.
+Controller geometry and predicates stay in the executor and planner context;
+they are not deleted from the system.
+
+The start planner must return `task_todo.items`, each with unique `id`, `target`,
+`goal`, and `completion_condition`. All start as pending, regardless of a planner
+claim of completion. Each item describes an object's desired final outcome,
+not a fixed sequence of motor commands. The first non-done item is active.
+
+After release, relook, retreat, help, failure, or a premature finish request,
+Astra reviews every item using a new same-frame image/sensor snapshot. A complete
+review returns each id with `pending`, `done`, `uncertain` or `unobserved` and an
+evidence explanation. `unobserved` retains its previous status/evidence/timestamp;
+it cannot create a new completion. Explicit contradictory evidence can reset a
+done item. Malformed reviews stop the episode rather than fabricate progress.
+
+The main thread owns todo updates. Each review abandons outstanding slow advice.
+A target switch additionally clears grasp/approach state, refreshes depth-based
+controller keypoints for that specific target, and verifies the marked grasp
+identity. A planner's identity assertion never substitutes for verification.
+`task_todo.json`, decision events and the final result retain todo progress.
+On official success, any remaining todo items are completed with explicit official-success evidence. Only official success ends the task successfully; visually done todos are not
+an official success signal.
+
+`reopen_and_retry` only opens in place. Subsequent alignment or relook is a
+separate choice. Standard intent definitions in `jev_observation.py` describe
+applicability using current images/sensors, not removed cached predicates.
+Library DSL recoveries can still force actions; this change is not a removal of
+the deterministic recovery controller.
 
 ## Diagnostics and asynchronous execution
 
@@ -44,6 +79,6 @@ Each async job owns detached nested state, an image file, and a private result b
 
 Libraries must pass `validate.py` before a simulator is created. A recovery exception is logged with its rule ID and terminates the episode as `harness_error`; there is no rollback for partially executed robot actions.
 
-The monitor receives the initial plan, current facts and episode lessons. A plan's `relook` step invokes visual perception; keypoints included in a planning reply trigger a visual refresh rather than replacing the perception base directly. Start-planning failures prevent entry into the Jev loop.
+The monitor receives the initial plan, current todo/active goal, controller facts and episode lessons. Todo and active goal are detached with the asynchronous snapshot. A plan's `relook` step invokes visual perception; keypoints included in a planning reply trigger a visual refresh rather than replacing the perception base directly. Start-planning failures prevent entry into the Jev loop.
 
 The adapter rejects nonzero CLI exit codes even if stdout contains JSON. Missing requested images, malformed/nonfinite geometry, and invalid plan adjustments are errors. Planning calls and visual calls are counted separately; zero cost from the CLI adapter is an unmeasured placeholder.

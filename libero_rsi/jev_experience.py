@@ -1,4 +1,6 @@
-"""Short actionable experience brief for Jev intent choice.
+"""Short actionable experience brief for Astra/Codex planning.
+
+Acting and spectator Jev use jev_observation instead of cached predicates.
 
 Recoveries + lessons are summarized for the decision-maker — not a full prose dump.
 Triggers stay general (predicate / failure-class level); no scene-specific angles.
@@ -125,7 +127,7 @@ def build_jev_experience_brief(
     max_lessons: int = 5,
     max_active: int = 3,
 ) -> Dict[str, Any]:
-    """Build a compact experience_brief for JC.choose state.
+    """Build a compact experience_brief for planner context.
 
     - active_recoveries: triggers true right now (if ns+dsl given), still have uses left
     - recoveries: short catalog of when→prefer (+hint)
@@ -182,11 +184,11 @@ def build_jev_experience_brief(
     if ep_lines:
         brief['episode_reflections'] = ep_lines
     if episode_start_plan and isinstance(episode_start_plan, dict):
-        # Compact prior for Jev: follow unless evidence contradicts; mid slow-think fine-tunes only.
+        # Compact historical prior for the planner: follow unless evidence contradicts; mid slow-think fine-tunes only.
         brief['episode_start_plan'] = {
             'note': (
-                'Episode-start Great Wall prior. Prefer intents consistent with step1_must / '
-                'phase_order unless current contact/identity evidence contradicts. Mid-episode '
+                'Episode-start Great Wall prior. Consider the historical step1_must / '
+                'phase_order only when current images and task_todo agree. Mid-episode '
                 'slow-think only fine-tunes; do not replan from zero.'
             ),
             'step1_must': episode_start_plan.get('step1_must'),
@@ -196,42 +198,3 @@ def build_jev_experience_brief(
             'plan': list(episode_start_plan.get('plan') or [])[:3],
         }
     return brief
-
-
-def jev_choose_state(
-    task: str,
-    facts: dict,
-    lib: dict,
-    ns=None,
-    uses=None,
-    episode_lessons=None,
-    episode_start_plan=None,
-    dsl=None,
-) -> dict:
-    """Full JC.choose state dict including experience_brief."""
-    return {
-        'task': task,
-        'observed_facts': facts,
-        'predicate_meanings': {
-            p['name']: p.get('meaning', '') for p in lib.get('predicates', [])
-        },
-        'experience_brief': build_jev_experience_brief(
-            lib, facts=facts, ns=ns, uses=uses,
-            episode_lessons=episode_lessons,
-            episode_start_plan=episode_start_plan, dsl=dsl,
-        ),
-    }
-
-
-def jev_choose_instructions(lib: dict, extra: str = '') -> str:
-    base = lib.get(
-        'intent_instructions',
-        'Select the next intent whose definition matches observed_facts.',
-    )
-    tip = (
-        ' Also weigh experience_brief: active recoveries (when→prefer) and relevant '
-        'lessons (when→instead). Stay consistent with them when facts match. '
-        'If experience_brief.episode_start_plan is present, honour step1_must / phase_order '
-        'unless current evidence clearly contradicts (then recover via stall menu / ask_astra).'
-    )
-    return base + tip + ((' ' + extra) if extra else '')

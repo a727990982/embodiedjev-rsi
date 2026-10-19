@@ -74,8 +74,12 @@ def fake_run(destination, fail_start=False):
     module('libero.libero.envs', OffScreenRenderEnv=FakeEnv)
     module('robosuite'); module('robosuite.utils', camera_utils=types.SimpleNamespace(get_real_depth_map=lambda sim, depth: depth))
     module('scipy'); module('scipy.spatial'); module('scipy.spatial.transform', Rotation=Rotation)
-    choices = iter(['ask_astra', 'relook', 'finish'])
+    choices = iter(['ask_astra', 'relook', 'retreat'])
     def choose(state, instruction, criteria, **kwargs):
+        assert kwargs.get('assets'), 'Jev must receive real image assets'
+        assert 'task_todo' in state and 'proprioception' in state
+        assert 'observed_facts' not in state and 'experience_brief' not in state
+        assert set(state['proprioception']) == {'gripper_xyz_m', 'gripper_orientation_xyzw', 'finger_joint_positions_m', 'fingers_opening_m', 'gripper_closed_command', 'left_finger_contact', 'right_finger_contact'}
         chosen = next(choices)
         assert chosen in criteria
         events.append('jev:' + chosen)
@@ -93,10 +97,15 @@ def fake_run(destination, fail_start=False):
             raw = {'grasp_px': [200, 300], 'object_center_px': [200, 300],
                    'place_px': [400, 240], 'matched_language_goal': True,
                    'goal_object_named': 'butter', 'place_region_named': 'basket'}
+        elif 'TASK TODO progress' in prompt:
+            events.append('todo_review')
+            assert kwargs['model'] == 'gpt-6-astra'
+            raw = {'items': [{'id': 'butter', 'status': 'pending', 'evidence': 'not placed'}]}
         elif 'episode-START' in prompt:
             events.append('start_plan')
             if fail_start: raise RuntimeError('injected start failure')
             raw = {'matched_language_goal': True, 'issue': 'ok', 'intervene': False,
+                   'task_todo': {'items': [{'id': 'butter', 'target': 'butter', 'goal': 'put butter in basket', 'completion_condition': 'butter inside basket and released'}]},
                    'plan': [], 'step1_must': 'approach', 'phase_order': ['approach','grasp','lift','place','retreat']}
         else:
             events.append('slow_plan')
@@ -108,7 +117,7 @@ def fake_run(destination, fail_start=False):
     library = Path(destination)/'library.json'
     library.write_text(json.dumps(lib))
     def exit_process(code): raise SystemExit(code)
-    env = {'HORIZON': '20', 'MAX_DEC': '5', 'GATE_JEV': '0', 'SLOW_MIN_GAP_S': '0'}
+    env = {'HORIZON': '20', 'MAX_DEC': '3', 'GATE_JEV': '0', 'SLOW_MIN_GAP_S': '0'}
     with patch.dict(os.environ, env, clear=True), patch.object(CAS, 'call_codex', side_effect=codex), \
          patch.object(sys, 'argv', ['run_ep_fbpatch.py','fake_suite','0','0',str(library),destination]), \
          patch.object(os, '_exit', side_effect=exit_process):
@@ -140,10 +149,12 @@ class RuntimeChainTests(unittest.TestCase):
         self.assertIn('jev:relook', events)
         self.assertEqual(events[-1], 'env_closed')
         self.assertEqual(result['decisions'], 3)
-        self.assertEqual(result['astra_calls'], 3)
-        self.assertEqual(result['planning_calls'], 3)
-        after_finish = events[events.index('jev:finish') + 1:]
-        self.assertNotIn('perception', after_finish)
+        self.assertGreaterEqual(result['astra_calls'], 5)
+        self.assertGreaterEqual(result['todo_review_calls'], 1)
+        self.assertIsNone(result['task_todo']['active_id'])
+        self.assertTrue(all(item['status'] == 'done' for item in result['task_todo']['items']))
+        self.assertGreaterEqual(result['planning_calls'], 3)
+        self.assertIn('todo_review', events)
 
     def test_start_plan_failure_does_not_enter_jev_loop(self):
         run, result, events = self.run_scenario(True)
