@@ -212,7 +212,8 @@ def verify_grasp_identity(p, rgb, phase='perceive_start_verify'):
     d.text((6, 6), 'RED MARK = proposed grasp', fill=(255, 0, 0))
     prompt = (f'Task instruction (language goal): "{_active_language_goal()}".\n'
               f'The RED circle+cross marks the proposed grasp pixel from a prior look.\n'
-              f'Using ONLY the language goal and THIS image (do not rely on memorized brand looks):\n'
+              f'Use the language goal, current RGB and aligned depth panels (do not rely on memorized brand looks). '
+              f'Read depth to separate overlapping surfaces; depth alone does not establish object identity.\n'
               f'{{"marked_object_what": short phrase naming what body the mark sits on,\n'
               f' "is_language_goal_object": true if that marked body IS the object the instruction asks to move, false if it is a different object, null if unsure,\n'
               f' "language_goal_where_if_different": if false/null, where the true language-goal object is in this image (or "not visible"), else null,\n'

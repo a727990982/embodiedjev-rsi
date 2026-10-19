@@ -411,7 +411,7 @@ def _prepare_slow_snapshot(ctx, crit, phase, both, image_tag):
         goal_id={'confirmed': vision.goal_id_confirmed(), 'target': GOAL_TARGET},
         ep_dir=rt.ep_dir, keyframe_paths=[p for p in (EP.get('failed_motion_before_path') or EP.get('motion_before_path'), frame) if p] + annotated)
     context['robot_geometry'] = geometry
-    context['motion_images_note'] = 'Optional failed-motion image first; current front+wrist composite next; annotated current robot-only projections last. Overlays are not future states or visibility masks.'
+    context['motion_images_note'] = 'Optional historical failed-motion image first; current front+wrist composite next; current robot-geometry + aligned metric-depth panels last. Read both current depth panels on every request. Overlays are not future states or visibility masks.'
     context['task_todo'] = json.loads(json.dumps(EP.get('task_todo')))
     context['active_goal'] = TODO.active_item(context['task_todo']) if context['task_todo'] else None
     return {'t': T[0], 'coding_context': context}

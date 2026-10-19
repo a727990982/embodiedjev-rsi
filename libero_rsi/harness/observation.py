@@ -11,6 +11,7 @@ import fine_steps as FS
 import jev_observation as JO
 import motion_feedback as MF
 import robot_geometry as RG
+import depth_observation as DO
 
 from . import pose, recovery, robot, vision
 from .config import (ASK_ASTRA_NAMES, CLOSE_NOT_READY, FINE_STEPS, MAX_RELOOK, MAX_SLOW, OPEN_MAX, RECOVERY_MODE, S,
@@ -117,7 +118,7 @@ def _jev_input(*, include_execution_history=False):
 
 
 def astra_geometry(tag, route=None):
-    """Snapshot own robot geometry and save explicitly annotated current views."""
+    """Snapshot robot geometry and registered whole-scene depth on the same frame."""
     frames = {'front': rt.obs['agentview_image'][::-1].copy()}
     if rt.obs.get('robot0_eye_in_hand_image') is not None:
         frames['wrist'] = rt.obs['robot0_eye_in_hand_image'][::-1].copy()
@@ -125,10 +126,20 @@ def astra_geometry(tag, route=None):
     cameras = {key: (names[key], im.shape[1], im.shape[0]) for key, im in frames.items()}
     geometry = RG.snapshot(rt.m, rt.sim.data, robot.eef(), rt.obs['robot0_eef_quat'], cameras, T[0])
     geometry['target_id'] = EP.get('todo_target_id')
+    depths = robot.depth_views()
+    geometry['depth_views'] = {}
     images = []
-    for view in geometry['cameras']:
+    for view, frame in frames.items():
         path = os.path.join(rt.ep_dir, f'geometry_{tag}_{T[0]}_{view}.png')
-        RG.overlay(frames[view], geometry, view, route).save(path)
+        overlay = RG.overlay(frame, geometry, view, route) if view in geometry['cameras'] else Image.fromarray(frame)
+        panel, info = DO.panel(overlay, depths.get(view), view=view, step=T[0])
+        panel.save(path)
+        info['panel_path'] = path
+        if depths.get(view) is not None:
+            raw_path = os.path.join(rt.ep_dir, f'depth_{tag}_{T[0]}_{view}.npy')
+            np.save(raw_path, depths[view], allow_pickle=False)
+            info['metric_depth_path'] = raw_path
+        geometry['depth_views'][view] = info
         images.append(path)
     context_path = os.path.join(rt.ep_dir, f'geometry_{tag}_{T[0]}.json')
     with open(context_path, 'w') as output:
