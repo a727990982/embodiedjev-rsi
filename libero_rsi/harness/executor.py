@@ -46,6 +46,8 @@ def execute(name, ns):
         PER['seen_held'] = False
         before_step = T[0]
         detail = recovery._apply_stall_feedback(ns, 'acting_motion_recovery', action=name)
+        if detail.get('motion_result') in ('stalled', 'timeout', 'horizon_or_done'):
+            return detail['motion_result']
         motion = EP.get('last_motion') or {}
         if motion.get('start_step', -1) >= before_step and motion.get('result') in ('stalled', 'timeout'):
             return motion['result']

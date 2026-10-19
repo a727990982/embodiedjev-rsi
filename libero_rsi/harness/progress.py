@@ -45,6 +45,7 @@ def _retarget_todo():
     EP['recovery_history_start'] = len(EP.get('hist', []))
     EP['last_recovery_preparation'] = None
     EP['last_failed_motion'] = None
+    EP['last_orientation_motion'] = None
     EP['failed_motion_before_path'] = None
     EP['motion_before_path'] = None
     EP.update(force_next_intent=None, grasp_confirm=False, grasp_secured_once=False,

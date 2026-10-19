@@ -155,6 +155,8 @@ def remember_geometry_advice(raw, geometry, source):
 def _motion_context():
     ns, _ = namespace()
     return {'current_robot_contacts': robot.robot_contacts(), 'last_motion': EP.get('last_motion'),
+            'current_orientation': robot.orientation_feedback(),
+            'last_orientation_motion': EP.get('last_orientation_motion'),
             'last_failed_motion': EP.get('last_failed_motion'),
             'recovery_validation': _recovery_context(),
             'recovery_control': RECOVERY_MODE,
@@ -343,11 +345,16 @@ def _candidate_execution(menu, ns, state):
                         {'operation': 'set_approach_command', 'yaw_from_deg': current, 'yaw_to_deg': yaw,
                          'z_object_height_units': patch_z},
                         {'operation': 'attempt_upward_servo_with_new_orientation', 'requested_raise_m': raise_m,
-                         'gripper': 'keep current command'}]
-                d['program_steps'].append({'operation': 'queue_existing_followup', 'intent': 'move_above_object'})
-                d['conditional_effects'] = ['If recovery is not interrupted, the executor queues approach; neither recovery nor approach tests descent.',
+                         'gripper': 'keep current command', 'orientation_tolerance_rad': .08,
+                         'requires_position_and_orientation': True}]
+                d['program_steps'].append({'operation': 'queue_existing_followup', 'intent': 'move_above_object',
+                    'condition': 'position and orientation reached' if name == 'change_approach_yaw' else 'recovery not interrupted'})
+                d['conditional_effects'] = [
+                    ('Yaw recovery queues approach only after position and orientation converge; preparation does not test descent.'
+                     if name == 'change_approach_yaw' else
+                     'If recovery is not interrupted, clear_reapproach queues approach; neither action tests descent.'),
                                             'The existing post-recovery deadend guard can still request global relook/diagnosis.']
-                d['unverified_physics'].append('Whether the hand actually reaches the commanded yaw; upward servo has no orientation-convergence requirement.')
+                d['unverified_physics'].append('Actual orientation/position convergence and obstacle clearance remain unverified until execution feedback; clear_reapproach retains position-only stopping.')
             recovery_validation = state.get('motion_context', {}).get('recovery_validation', {})
             d['current_recovery_evidence'] = {k: recovery_validation[k] for k in
                 ('preparations_without_descent', 'no_progress', 'descent_tested_since_preparation') if k in recovery_validation}

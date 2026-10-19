@@ -38,6 +38,7 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
         def from_rotvec(cls, value): return cls()
         def as_euler(self, axes): return np.zeros(3)
         def as_rotvec(self): return np.zeros(3)
+        def as_quat(self): return np.array([0.,0.,0.,1.])
         def inv(self): return self
         def __mul__(self, other): return self
     class FakeEnv:
@@ -99,6 +100,11 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
         assert stage_progress['next_stage'] == 'secure_grasp'
         assert not stage_progress['current_grasp_confirmed']
         assert 'observed_facts' not in state and 'experience_brief' not in state
+        orientation = state['motion_context']['current_orientation']
+        assert orientation['observation_step'] == state['observation_step']
+        assert len(orientation['target_quaternion_xyzw']) == 4
+        assert len(orientation['actual_quaternion_xyzw']) == 4
+        assert 'remaining_angle_deg' in orientation and 'within_tolerance' in orientation
         assert state['robot_geometry_advice']['target_id'] == state['task_todo']['active_id']
         assert state['robot_geometry_advice']['geometry_status'] == 'available'
         assert state['robot_geometry_advice']['age_steps'] >= 0

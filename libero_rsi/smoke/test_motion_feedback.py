@@ -116,11 +116,12 @@ class MotionTests(unittest.TestCase):
             def from_quat(cls,*a):return cls()
             def inv(self):return self
             def as_rotvec(self):return np.zeros(3)
+            def as_quat(self):return np.array([0.,0.,0.,1.])
             def __mul__(self,other):return self
         ep={};t=[0];events=[]
         contacts={'environment_contact_parts':['arm'],'self_contact_parts':[]}
         with tempfile.TemporaryDirectory() as temp:
-            scope=functions('servo',MF=MF,np=np,Rot=Rotation,Q0=Rotation(),EP=ep,T=t,DONE=[False],
+            scope=functions('servo','commanded_rotation','orientation_feedback',MF=MF,np=np,Rot=Rotation,Q0=Rotation(),EP=ep,T=t,DONE=[False],
                 HORIZON=600,PER={'yaw':0},PATCH={},RSHAPE={},SHAPE={},Image=Image,ep_dir=temp,
                 obs={'robot0_eef_quat':[0,0,0,1]},eef=lambda:np.array([0.,0.,.1]),
                 robot_contacts=lambda:contacts,_combo_rgb=lambda:(np.zeros((3,6,3),dtype='uint8'),None,None),

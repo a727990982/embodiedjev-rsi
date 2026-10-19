@@ -85,6 +85,23 @@ motion before-images and startup obstacle advice are explicitly historical.
 Commanded waypoints are estimates, never simulator object truth or a certificate
 of a collision-free path. Cached `seen_held` and library predicates are not sent.
 
+`motion_context.current_orientation` compares the full commanded world rotation
+with the current measured quaternion, reporting the shortest 3-D residual in
+radians/degrees and its tolerance. Each servo report also records initial,
+target and actual quaternions, net requested/actual rotation, position arrival,
+and whether orientation was required for `reached`. Position-only completion
+must not be interpreted as rotation completion. The most recent explicit rotation
+attempt remains in `last_orientation_motion` with its original step, even after
+a later translation; target switches clear this history.
+
+Yaw-changing recovery and pose-menu rotation/home require position AND orientation
+convergence, using the existing pose-menu tolerance of 0.08 rad (about 4.6 degrees).
+Failed yaw recovery returns its motion failure instead of a prepared result and
+does not queue the normal approach follow-up. Rotation toward Astra verifies the
+real pose even when the two commanded yaws already agree. Rotational progress
+counts against servo stall detection for orientation-constrained motions. This
+verifies pose arrival, not environmental clearance or grasp success.
+
 Acting Jev also receives `grasp_experience`: up to three short entries with an
 applicable condition, interpretation, options to consider, outcome checks and
 source references. The ten curated entries cover identity uncertainty, failed

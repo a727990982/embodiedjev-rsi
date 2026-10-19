@@ -44,10 +44,10 @@ def _clear_reapproach_delta(ns):
     return .25 * delta[0] / norm, .25 * delta[1] / norm
 
 
-def _raise_tcp(scale=2.0, max_steps=40):
+def _raise_tcp(scale=2.0, max_steps=40, ori_tol=None):
     """Lift gripper in place (open or closed as currently commanded)."""
     up_z = max(scale * float(PER.get('obj_h', 0.05)), 0.06)
-    robot.servo(robot.eef() + np.array([0.0, 0.0, up_z]), -1.0 if not EP['closed'] else 1.0, 1.0, max_steps=max_steps, tol=0.01)
+    robot.servo(robot.eef() + np.array([0.0, 0.0, up_z]), -1.0 if not EP['closed'] else 1.0, 1.0, max_steps=max_steps, tol=0.01, ori_tol=ori_tol)
     return up_z
 
 
@@ -314,17 +314,19 @@ def _choose_stall_feedback(ns):
 
 
 def _apply_relative_approach_change(ns, reason):
-    """Raise then rotate approach about vertical relative to current command. Mutates PATCH; physical raise."""
+    """Attempt upward motion with a new yaw; require position and orientation convergence."""
     EP['approach_changes'] = int(EP.get('approach_changes', 0)) + 1
     cur, delta, new_yaw = _approach_yaw_plan(ns or {}, EP['approach_changes'])
     PATCH['yaw_deg'] = new_yaw
     # Shallower fingertip target (positive dz = higher grasp) — observed stall often needs less depth.
     PATCH['grasp_dz_objh'] = float(np.clip(float(PATCH.get('grasp_dz_objh') or 0.0) + 0.15, -0.5, 0.5))
     vision._note_patch_mutation('approach_change', {'reason': reason, 'yaw_to': new_yaw})
-    _raise_tcp(2.0)
+    _raise_tcp(2.0, ori_tol=.08)
+    motion = EP.get('last_motion') or {}
+    measured = {'motion_result': motion.get('result'), 'orientation': motion.get('orientation')}
     log(t=T[0], approach_change=True, reason=reason, yaw_from=round(cur, 1), yaw_delta=round(delta, 1),
-        yaw_to=round(new_yaw, 1), grasp_dz_objh=PATCH['grasp_dz_objh'], approach_changes=EP['approach_changes'])
-    return {'yaw_from': cur, 'yaw_delta': delta, 'yaw_to': new_yaw, 'grasp_dz_objh': PATCH['grasp_dz_objh']}
+        yaw_to=round(new_yaw, 1), grasp_dz_objh=PATCH['grasp_dz_objh'], approach_changes=EP['approach_changes'], **measured)
+    return {'yaw_from': cur, 'yaw_delta': delta, 'yaw_to': new_yaw, 'grasp_dz_objh': PATCH['grasp_dz_objh'], **measured}
 
 
 def _execute_push_aside(ns, reason='stall', plan_step=None, dep=None):
@@ -515,7 +517,7 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
     elif action == 'change_approach_yaw':
         ch = _apply_relative_approach_change(ns, reason)
         detail.update(ch)
-        EP['force_next_intent'] = 'move_above_object'
+        EP['force_next_intent'] = 'move_above_object' if ch['motion_result'] == 'reached' else None
 
     elif action == 'confirm_contact':
         # Require bilateral contact before treating the grasp as secure / before lift.
@@ -533,9 +535,10 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
             detail['confirm'] = 'closed_no_bilateral_reopen'
         elif (l or r) and not both and not EP['closed']:
             # Partial contact: shallow + relative yaw, then close only after re-approach.
-            _apply_relative_approach_change(ns, reason + ':partial_contact')
+            ch = _apply_relative_approach_change(ns, reason + ':partial_contact')
+            detail.update(ch)
             detail['confirm'] = 'partial_contact_reapproach'
-            EP['force_next_intent'] = 'move_above_object'
+            EP['force_next_intent'] = 'move_above_object' if ch['motion_result'] == 'reached' else None
         else:
             PATCH['grasp_dz_objh'] = float(np.clip(float(PATCH.get('grasp_dz_objh') or 0.0) + 0.15, -0.5, 0.5))
             _raise_tcp(2.0)
@@ -571,6 +574,8 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
         EP['last_recovery_preparation'] = {
             'step': T[0], 'action': action, 'before': before_recovery,
             'after': {'tcp_xyz_m': robot.eef().tolist(), 'commanded_orientation_deg': vision._motion_orientation()},
+            'orientation_attempt': detail.get('orientation'),
+            'motion_result': detail.get('motion_result'),
             'status': 'preparation_attempted_descent_unverified',
         }
     _record_local_stall_family(action)

@@ -135,15 +135,51 @@ def bp(uv, dep):
     d = float(np.median(dep[v - 2:v + 3, u - 2:u + 3])); return rt.CP + rt.RM @ np.array([(uv[0] - S / 2) / rt.F, -(uv[1] - S / 2) / rt.F, -1.0]) * d
 
 
+def commanded_rotation():
+    """Exactly the world-frame orientation used by the servo (not a measured yaw)."""
+    pick = lambda pk, sk, d: next((v for v in (PATCH[pk], RSHAPE[sk], SHAPE[sk]) if v is not None), d)
+    yw = pick('yaw_deg', 'yaw', PER['yaw'])
+    tl = float(np.clip(pick('tilt_deg', 'tilt', 0), 0, 30))
+    td = pick('tilt_dir_deg', 'tdir', 0)
+    return (Rot.from_rotvec(np.deg2rad(tl) * np.array([np.cos(np.deg2rad(td + 90)), np.sin(np.deg2rad(td + 90)), 0]))
+            * Rot.from_euler('z', np.deg2rad(yw)) * rt.Q0)
+
+
+def orientation_feedback(target_rotation=None, tolerance_rad=.08):
+    """Shortest 3-D angular error; rotation vector is expressed in world axes."""
+    goal = commanded_rotation() if target_rotation is None else target_rotation
+    actual = Rot.from_quat(rt.obs['robot0_eef_quat'])
+    residual = (goal * actual.inv()).as_rotvec()
+    angle = float(np.linalg.norm(residual))
+    return {'observation_step': T[0], 'target_quaternion_xyzw': goal.as_quat().tolist(),
+            'actual_quaternion_xyzw': actual.as_quat().tolist(),
+            'error_rotation_vector_world_rad': residual.tolist(),
+            'remaining_angle_rad': angle, 'remaining_angle_deg': float(np.rad2deg(angle)),
+            'tolerance_rad': float(tolerance_rad), 'within_tolerance': angle < tolerance_rad,
+            'angle_note': 'Angles are shortest endpoint rotations, not accumulated rotational travel.',
+            'source': 'commanded full orientation versus current robot proprioception; not scene truth'}
+
+
 def servo(target, grip, gain=1.0, max_steps=60, tol=.006, ori_tol=None):
     last = eef(); stall = 0; prev_ori = None
     start, start_step = last.copy(), T[0]
+    Rt = commanded_rotation()
+    start_rotation = Rot.from_quat(rt.obs['robot0_eef_quat'])
     before_contacts = robot_contacts()
     during = {'environment': set(), 'self': set()}
     before_image = _combo_rgb()[0].copy()
     def finish(result):
         EP['last_motion'] = MF.motion_report(start.tolist(), eef().tolist(), target.tolist(),
             start_step, T[0], result, before_contacts, during, robot_contacts())
+        orientation = orientation_feedback(Rt, .08 if ori_tol is None else ori_tol)
+        orientation.update(required_for_reached=ori_tol is not None,
+            start_quaternion_xyzw=start_rotation.as_quat().tolist(),
+            requested_rotation_angle_deg=float(np.rad2deg(np.linalg.norm((Rt * start_rotation.inv()).as_rotvec()))),
+            actual_rotation_angle_deg=float(np.rad2deg(np.linalg.norm((Rot.from_quat(rt.obs['robot0_eef_quat']) * start_rotation.inv()).as_rotvec()))))
+        EP['last_motion'].update(orientation=orientation,
+            position_reached=bool(np.linalg.norm(target-eef()) < tol), position_tolerance_m=tol)
+        if ori_tol is not None:
+            EP['last_orientation_motion'] = EP['last_motion']
         EP['motion_before_path'] = None
         if result in ('stalled', 'timeout'):
             EP['last_failed_motion'] = EP['last_motion']
@@ -153,9 +189,6 @@ def servo(target, grip, gain=1.0, max_steps=60, tol=.006, ori_tol=None):
             EP['failed_motion_before_path'] = path
         log(t=T[0], motion_feedback=EP['last_motion'])
         return result
-    pick = lambda pk, sk, d: next((v for v in (PATCH[pk], RSHAPE[sk], SHAPE[sk]) if v is not None), d)
-    yw = pick('yaw_deg', 'yaw', PER['yaw']); tl = float(np.clip(pick('tilt_deg', 'tilt', 0), 0, 30)); td = pick('tilt_dir_deg', 'tdir', 0)
-    Rt = Rot.from_rotvec(np.deg2rad(tl) * np.array([np.cos(np.deg2rad(td + 90)), np.sin(np.deg2rad(td + 90)), 0])) * Rot.from_euler('z', np.deg2rad(yw)) * rt.Q0
     for _ in range(max_steps):
         if T[0] >= HORIZON or DONE[0]: return finish('horizon_or_done')
         d = target - eef(); a = np.zeros(7); a[:3] = np.clip(d / .05 * 1.6, -1, 1) * float(np.clip(gain, .15, 1.0))
@@ -164,7 +197,7 @@ def servo(target, grip, gain=1.0, max_steps=60, tol=.006, ori_tol=None):
         contact_state = robot_contacts()
         during['environment'].update(contact_state['environment_contact_parts'])
         during['self'].update(contact_state['self_contact_parts'])
-        ori_err = float(np.linalg.norm((Rt * Rot.from_quat(rt.obs['robot0_eef_quat']).inv()).as_rotvec())) if ori_tol is not None else 0.0
+        ori_err = float(np.linalg.norm((Rt * Rot.from_quat(rt.obs['robot0_eef_quat']).inv()).as_rotvec()))
         if np.linalg.norm(target - eef()) < tol and (ori_tol is None or ori_err < ori_tol):
             return finish('reached')
         ori_progress = ori_tol is not None and prev_ori is not None and prev_ori - ori_err > .002

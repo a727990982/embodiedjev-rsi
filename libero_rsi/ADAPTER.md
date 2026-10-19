@@ -46,6 +46,15 @@ Robot contacts include fingers, palm/wrist and arm against the environment
 (including fixtures), plus self-contact. They expose no other-body names, IDs,
 poses or forces. Contact is not automatically classified as blockage.
 
+`current_orientation` is a fresh commanded-versus-measured full quaternion check.
+Servo `orientation` feedback records the start/target/actual quaternions, shortest
+net rotation angles, world-frame residual rotation vector, remaining angular error
+and tolerance. `required_for_reached` distinguishes position-only completion from
+pose completion. Yaw-changing recovery and explicit pose-menu rotation/home require
+both conditions; the angular tolerance is 0.08 rad. A failed yaw change does not
+queue its normal approach follow-up. `last_orientation_motion` retains the measured
+explicit-rotation result until another such attempt or a target switch.
+
 Astra's visual requests also include `robot_geometry`: static dimensions and
 current poses of robot0/gripper0/mount0 bodies, own hinge/slide joints, TCP-relative
 offsets and front/wrist camera calibration. Only own-robot geoms/joints are read
