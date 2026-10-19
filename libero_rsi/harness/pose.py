@@ -243,9 +243,7 @@ def _execute_pose_menu(it, ns):
         if pose == 'rotate_toward_astra':
             astra = float(PER.get('yaw', 0.0) or 0.0)
             new_yaw, step = _yaw_toward(cur, astra, float(it.get('yaw_step_deg', 15)))
-            if abs(step) < 0.5:
-                _pose_note(kind, f'in-place rotate toward Astra yaw {astra:.1f}: already aligned; position held')
-                return 'at_target'
+            # Equal commanded yaws do not prove the real gripper reached that pose.
             label = f'in-place rotate {abs(step):.1f} deg toward Astra yaw {astra:.1f}'
         else:
             new_yaw, step = _yaw_step(cur, float(it.get('yaw_delta_deg', 0)))

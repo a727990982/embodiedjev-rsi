@@ -16,6 +16,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+import robot_geometry as RG
 
 ALLOWED_STEPS = frozenset({
     'relook', 'raise_redescend', 'lateral_recenter', 'change_approach_yaw',
@@ -52,7 +53,7 @@ You receive:
 - keyframe_paths: 0–4 still image paths (front+wrist composites when present)
 - trigger: why you were woken (stall / spectator_defer / hard_identity / ask_astra / …)
 - motion_context: requested/actual displacement and robot-part contacts, including palm/arm/fixtures.
-  If two keyframes are supplied, the first is before the failed motion and the last is current.
+  motion_images_note describes historical/current images and geometry overlays explicitly.
 
 EmbodiedEvo analogy: there the coding agent writes solution.py from observations/.
 Here Jev already selects intents; you only patch the episode plan / recovery.
@@ -145,7 +146,7 @@ def build_prompt(ctx: Dict[str, Any]) -> str:
         lang=ctx.get('language_goal') or '',
         issues=' | '.join(sorted(ALLOWED_ISSUES)),
         context_json=json.dumps(ctx, ensure_ascii=False, indent=2, default=str),
-    )
+    ) + RG.INSTRUCTIONS
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
@@ -568,7 +569,7 @@ def build_perceive_prompt(ctx: Dict[str, Any]) -> str:
         img_size=int(ctx.get('img_size') or 512),
         phase=ctx.get('phase') or 'perceive_start',
         extra_context=extra,
-    )
+    ) + RG.INSTRUCTIONS
 
 
 def call_perceive(
@@ -749,7 +750,7 @@ def build_start_prompt(ctx: Dict[str, Any]) -> str:
         step1=' | '.join(sorted(ALLOWED_STEP1)),
         phases=' | '.join(sorted(ALLOWED_PHASES)),
         context_json=json.dumps(ctx, ensure_ascii=False, indent=2, default=str),
-    )
+    ) + RG.INSTRUCTIONS
 
 
 def _lang_multi_object_cues(lang: str) -> bool:

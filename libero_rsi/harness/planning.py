@@ -207,17 +207,21 @@ def _run_episode_start_plan():
         ),
     }
     # Annotate the proposed route so geometry can be related to the same front view.
-    images = [observation._save_approach_overlay(start_hints['approach_geometry'])]
-    for name in ('start.jpg', 'start_wrist.jpg', 'start_id_verify.jpg', 'start_id_relook.jpg'):
+    geometry, annotated = observation.astra_geometry('start_plan', route=start_hints['approach_geometry'])
+    start_hints['robot_geometry'] = geometry
+    images = []
+    for name in ('start.jpg', 'start_wrist.jpg'):
         fp = os.path.join(rt.ep_dir, name)
         if os.path.isfile(fp):
             images.append(fp)
+    images.extend(annotated or [observation._save_approach_overlay(start_hints['approach_geometry'])])
     parsed, rec = None, {}
     try:
         parsed, rec = CAS.harness_call_start_plan(
             lang=rt.LANG, experience_brief=brief, start_hints=start_hints,
             ep_dir=rt.ep_dir, image_paths=images, mode='codex')
         _account_slow_rec(rec)
+        observation.remember_geometry_advice(parsed.get('robot_geometry_advice'), geometry, 'start_plan')
         proposed_plan = parsed
         if vision.identity_fields(parsed)['matched_language_goal'] is False:
             vision.set_goal_id(False, 'episode_start_plan_rejected', vision.identity_fields(parsed))
@@ -324,6 +328,8 @@ def _slow_ctx(intent, result):
 
 def _finish_slow(parsed, rec, dep, both, intent, result, mode, crit, snap_dec):
     """Apply a finished Codex slow-think reply on the main thread (env-safe)."""
+    if rec.get('robot_geometry_source'):
+        observation.remember_geometry_advice(parsed.get('robot_geometry_advice'), rec['robot_geometry_source'], mode)
     _account_slow_rec(rec)
     issue = str(parsed.get('issue') or 'ok')
     _igo = parsed.get('is_goal_object')
@@ -394,12 +400,14 @@ def _prepare_slow_snapshot(ctx, crit, phase, both, image_tag):
     # Unique image and detached policy context belong to this request.
     frame = os.path.join(rt.ep_dir, f'slow_input_{image_tag}.jpg')
     Image.fromarray(both).save(frame)
+    geometry, annotated = observation.astra_geometry(image_tag)
     context = CAS.prepare_slow_context(
         lang=rt.LANG, trigger=str(crit or phase), slow_ctx_json=ctx,
         experience_brief=brief, patch=PATCH,
         goal_id={'confirmed': vision.goal_id_confirmed(), 'target': GOAL_TARGET},
-        ep_dir=rt.ep_dir, keyframe_paths=[p for p in (EP.get('failed_motion_before_path') or EP.get('motion_before_path'), frame) if p])
-    context['motion_images_note'] = 'First image, when two supplied, is before last failed motion; last image is current.'
+        ep_dir=rt.ep_dir, keyframe_paths=[p for p in (EP.get('failed_motion_before_path') or EP.get('motion_before_path'), frame) if p] + annotated)
+    context['robot_geometry'] = geometry
+    context['motion_images_note'] = 'Optional failed-motion image first; current front+wrist composite next; annotated current robot-only projections last. Overlays are not future states or visibility masks.'
     context['task_todo'] = json.loads(json.dumps(EP.get('task_todo')))
     context['active_goal'] = TODO.active_item(context['task_todo']) if context['task_todo'] else None
     return {'t': T[0], 'coding_context': context}
@@ -411,6 +419,8 @@ def _slow_worker(job_id, result_box, snapshot):
     try:
         import coding_agent_slow as CAS
         parsed, rec = CAS.call_monitor(snapshot['coding_context'], mode='codex')
+        geom = snapshot['coding_context'].get('robot_geometry', {})
+        rec = dict(rec, robot_geometry_source={k: geom[k] for k in ('observation_step', 'target_id', 'status') if k in geom})
         events.append(dict(t=snapshot['t'], coding_agent_slow=True, mode='codex', job_id=job_id,
             issue=parsed.get('issue'), intervene=parsed.get('intervene'),
             plan=parsed.get('plan'), backend=rec.get('backend')))
@@ -605,6 +615,8 @@ def _sync_slow(intent, result, crit):
         import coding_agent_slow as CAS
         snapshot = _prepare_slow_snapshot(ctx, crit, 'sync', both, f'sync_{_next_slow_job_id()}')
         parsed, rec = CAS.call_monitor(snapshot['coding_context'], mode='codex')
+        geom = snapshot['coding_context'].get('robot_geometry', {})
+        rec = dict(rec, robot_geometry_source={k: geom[k] for k in ('observation_step', 'target_id', 'status') if k in geom})
     except Exception as e:
         log(t=T[0], coding_agent_slow_error=True, mode='codex', sync=True, err=str(e)[:300])
         return f'sync_error:coding_agent:{e}', None

@@ -21,7 +21,9 @@ def fixture():
     ns={'tcp':tcp.copy(),'grasp':np.array([.0,0,.01]),'objc':per['objc'],
         'obj_h':.03,'obj_w':.02,'left_contact':False,'right_contact':False}
     def servo(target,*args,**kw):
-        commands.append((np.array(target).tolist(),args,kw));tcp[:]=target;return 'reached'
+        commands.append((np.array(target).tolist(),args,kw));tcp[:]=target
+        ep['last_motion']={'result':'reached'}
+        return 'reached'
     scope=functions('_candidate_execution','_clear_reapproach_delta','_approach_yaw_plan',
         '_relative_yaw_delta_deg','_cmd_yaw_deg','_motion_orientation',
         '_apply_stall_feedback','_apply_relative_approach_change','_nudge_grasp_xy','_raise_tcp',
@@ -92,7 +94,9 @@ class CandidateTests(unittest.TestCase):
             self.assertEqual(scope['PATCH']['yaw_deg'],d['program_steps'][0]['yaw_to_deg'])
             self.assertEqual(scope['EP']['approach_changes'],count+1)
             self.assertEqual(len(calls),1)
-            self.assertIn('no orientation-convergence',d['unverified_physics'][-1])
+            self.assertEqual(calls[0][2]['ori_tol'], .08)
+            self.assertTrue(d['program_steps'][1]['requires_position_and_orientation'])
+            self.assertEqual(scope['EP']['force_next_intent'], 'move_above_object')
 
     def test_existing_deadend_guard_is_described_without_running_it(self):
         scope,ns,menu,state,calls=fixture()

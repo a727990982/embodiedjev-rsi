@@ -73,6 +73,9 @@ class FakeRot:
         err = 0.0 if self.err is None else float(self.err)
         return np.array([err, 0.0, 0.0])
 
+    def as_quat(self):
+        return np.array([0.,0.,0.,1.])
+
 
 WORLD = {'err': 1.0, 'steps': 0, 'mode': 'hold', 'goal': np.zeros(3)}
 
@@ -233,9 +236,10 @@ class PoseMenuTests(unittest.TestCase):
         patch_state['yaw_deg'] = 40.0
         scope['_cmd_yaw_deg'] = lambda: 40.0
         result = scope['_execute_pose_menu'](spec['rotate_yaw_toward_astra'], {'tcp': tcp})
-        self.assertEqual(result, 'at_target')
-        self.assertEqual(calls, [])
-        self.assertIn('already aligned', ep['pose_menu_note'])
+        self.assertEqual(result, 'reached')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]['ori_tol'], .08)
+        self.assertIn('servo reached', ep['pose_menu_note'])
 
         calls.clear()
         scope['_cmd_yaw_deg'] = lambda: 0.0
@@ -322,7 +326,7 @@ class PoseMenuTests(unittest.TestCase):
 
         temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup)
         scope = functions(
-            'servo', np=np, eef=eef, step=step, T=T, DONE=[False], HORIZON=1000, Rot=FakeRot, Q0=FakeRot(),
+            'servo','commanded_rotation','orientation_feedback', np=np, eef=eef, step=step, T=T, DONE=[False], HORIZON=1000, Rot=FakeRot, Q0=FakeRot(),
             obs={'robot0_eef_quat': np.array([0.0, 0.0, 0.0, 1.0])},
             PATCH={'yaw_deg': 0.0, 'tilt_deg': 0.0, 'tilt_dir_deg': 0.0},
             RSHAPE={'yaw': None, 'tilt': None, 'tdir': None},

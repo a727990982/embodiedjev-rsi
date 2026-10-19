@@ -79,6 +79,8 @@ class RegressionTests(unittest.TestCase):
                 ep = {}
                 applied = []
                 scope = functions('_run_episode_start_plan', 'set_goal_id', 'goal_id_confirmed', 'identity_fields',
+                    astra_geometry=lambda *a, **kw: ({'status': 'unavailable'}, []),
+                    remember_geometry_advice=lambda *a: None,
                     JX=JX, LIB={'intents': [], 'lessons': []}, dsl=None,
                     EP=ep, GOAL_ID=gid, T=[37], START_ID={'final': {}, 'verify': {}}, per0={},
                     _approach_geometry=lambda:{}, _save_approach_overlay=lambda geometry:'overlay.png',
@@ -101,6 +103,8 @@ class RegressionTests(unittest.TestCase):
     def test_start_plan_failure_does_not_switch_to_astra(self):
         with tempfile.TemporaryDirectory() as temp:
             scope = functions('_run_episode_start_plan',
+                astra_geometry=lambda *a, **kw: ({'status': 'unavailable'}, []),
+                remember_geometry_advice=lambda *a: None,
                 JX=JX, LIB={'intents': [], 'lessons': []}, dsl=None, EP={}, T=[0],
                 START_ID={'final': {}, 'verify': {}}, per0={},
                     _approach_geometry=lambda:{}, _save_approach_overlay=lambda geometry:'overlay.png', LANG='goal', ep_dir=temp,
@@ -136,6 +140,7 @@ class RegressionTests(unittest.TestCase):
             target = {'base': {'pixel': [2]}}
             events = []
             scope = functions('_prepare_slow_snapshot', '_slow_worker', '_log_slow_result',
+                astra_geometry=lambda *a, **kw: ({'status': 'unavailable'}, []),
                 T=[5],
                 JX=SimpleNamespace(build_jev_experience_brief=lambda *a, **kw: {'lessons': ['prior']}),
                 LIB={}, dsl=None, EP={'uses': {}}, LANG='goal', PATCH=patch_state, GOAL_TARGET=target,

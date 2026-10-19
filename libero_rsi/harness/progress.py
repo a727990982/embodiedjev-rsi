@@ -41,9 +41,11 @@ def _retarget_todo():
     planning._abandon_async_slow('todo_target_changed')
     old_id = EP.get('todo_target_id')
     EP['todo_target_id'] = new_id
+    EP.pop('robot_geometry_advice', None)
     EP['recovery_history_start'] = len(EP.get('hist', []))
     EP['last_recovery_preparation'] = None
     EP['last_failed_motion'] = None
+    EP['last_orientation_motion'] = None
     EP['failed_motion_before_path'] = None
     EP['motion_before_path'] = None
     EP.update(force_next_intent=None, grasp_confirm=False, grasp_secured_once=False,
