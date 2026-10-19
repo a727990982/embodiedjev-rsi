@@ -88,5 +88,7 @@ def execution_history(intents, results):
         'consecutive_same_intent_and_result': same_pair,
         'note': ('Past completed actions and executor return values, not claims about '
                  'the current scene or task success. Counts include the latest completed '
-                 'action. Current images and proprioception describe the present state.'),
+                 'action. A grasp_failed result means no confirmed grasp; *_not_executed '
+                 'means the requested motion did not run. Current images and proprioception '
+                 'describe the present state.'),
     }

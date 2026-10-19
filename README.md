@@ -36,6 +36,13 @@ plus the consecutive count of the same intent and the same intent/result pair.
 Counts cover the full trailing streak even when it exceeds eight actions.
 These are past executor outcomes, not assertions about the current scene or
 task completion. Candidate wording and decision instructions are unchanged.
+`lift`, `carry_to_place` and `lower_to_place` are offered only with a confirmed
+target grasp supported by current gripper contacts/opening. The executor repeats
+this check, including for forced actions, and never implicitly closes an empty
+gripper for a transport request. A failed close returns
+`grasp_failed:transport_not_executed`; a blocked transport returns
+`<intent>_not_executed:grasp_unconfirmed`. These failure results enter the next
+Jev history and trigger the existing failure/todo-review paths.
 
 Candidates describe applicability and actual motion. An empty closed gripper
 should reopen; `reopen_and_retry` opens **at the current pose**, leaving alignment
@@ -99,13 +106,20 @@ text-only model. The [TypeSafe image protocol](https://docs.typesafe.ai/images)
 is used for both acting and spectator decisions.
 
 Real rollouts also require an authenticated Codex CLI, LIBERO with its assets,
-MuJoCo/robosuite, SciPy, NumPy, Pillow and rendering dependencies. `astra_client`
+MuJoCo/robosuite, SciPy, NumPy, Pillow, `ffmpeg` with libx264, and rendering dependencies. `astra_client`
 and an external `jev_choice` are not needed. After configuring credentials and
 dependencies:
 
 ```bash
 python libero_rsi/run_ep_fbpatch.py SUITE TID INIT LIB.json OUTDIR
 ```
+
+Real episodes record `OUTDIR/SUITE_tTASK_iINIT/episode.mp4` by default, with
+front/wrist views and step/action captions. Encoding uses one CPU thread. Set
+`VIDEO=/path/to/episode.mp4` to choose another output path; offline tests use
+`VIDEO=''` to disable recording. The result includes the video path and encoder
+exit code. A missing ffmpeg fails before model calls instead of silently omitting
+the recording.
 
 A failed start plan stops the episode before Jev decisions and is recorded as `harness_error`. Libraries are validated before environment creation. Recovery-rule errors are logged and end the episode with `harness_error`, rather than silently continuing with potentially partial state changes.
 

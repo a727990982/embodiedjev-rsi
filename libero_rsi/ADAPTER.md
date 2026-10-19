@@ -50,6 +50,23 @@ Spectator additionally gets actual recent intent/result events and help budgets.
 Controller geometry and predicates stay in the executor and planner context;
 they are not deleted from the system.
 
+Transport candidates (`lift`, `carry_to_place`, `lower_to_place`) require a
+closed gripper, confirmed target identity, a successful grasp confirmation, and
+current tactile support. An old `grasp_secured_once` or visual held estimate
+alone cannot enable them. The executor enforces the same precondition for direct
+and forced calls; it returns `<intent>_not_executed:grasp_unconfirmed` without
+moving or closing when it fails. A failed grasp attempt returns
+`grasp_failed:transport_not_executed`, not `closed`, even if the fingers moved.
+`closed` is returned after a successful grasp confirmation. The explicit failures
+are passed to acting Jev history and existing failure/todo-review handling.
+
+Episode recording defaults to `episode.mp4` inside the episode output directory.
+It requires ffmpeg/libx264, uses one encoder thread, and includes front/wrist
+images and the actual horizon in the caption. `VIDEO` overrides the path; an
+explicit empty `VIDEO` disables recording for offline tests. Encoder completion
+is awaited before writing `result.json`, which includes `video_path` and
+`video_exit_code` when recording is enabled.
+
 The start planner must return `task_todo.items`, each with unique `id`, `target`,
 `goal`, and `completion_condition`. All start as pending, regardless of a planner
 claim of completion. Each item describes an object's desired final outcome,
