@@ -21,6 +21,7 @@ Plan JSON is persisted as start_plan.json; mid-episode slow-think fine-tunes the
 After close_gripper: proprio+lift grasp confirm (log grasp_confirm); secured → lift, suppress push_aside/local_deadend undo.
 Hard local-deadend rule: repeated local stall family (push_aside/clear_reapproach/raise_redescend/lateral) without progress, or push_aside episode/approach cap → retreat + global front relook + SYNCHRONOUS slow-think replan (Codex slow-think); Jev motion held until plan applied.
 Place-phase: after carry_to_place reached, N consecutive lower_to_place stall/timeout (MAX_PLACE_LOWER_STALL) or M lift↔lower cycles (MAX_PLACE_LIFT_LOWER_CYCLES) while TCP/held XY is over the place region → force open_gripper (log place_force_release); avoid endless lift↔lower thrash over basket.
+Fine steps (FINE_STEPS=1, default off): merge libs/ee_pg_fine_steps.json into the loaded menu before validation. Each option servos at most 3 cm along one world axis, keeps the gripper command, and reports the servo result plus the new end-effector position in observed_facts.last_fine_step. Unset or 0 leaves the loaded library unchanged.
 Freshness/isolation: each async slow-think job has a unique job_id + private result_box (abandoned workers cannot overwrite a newer job); after keypoint refresh, close is blocked until TCP re-approaches the new grasp XY; recovery mutations recompute namespace/facts before execute and spectator.
 """
 import os, sys, json, time, gc, re, threading, queue
@@ -43,6 +44,7 @@ except ModuleNotFoundError as ex:
     raise SystemExit(f'Missing external client {ex.name}. See libero_rsi/ADAPTER.md; '
                      'provide the bench clients via PYTHONPATH or libero_rsi/bench_common/.') from ex
 import dsl_libero as dsl
+import fine_steps as FS
 from validate import validate
 import jev_experience as JX
 from libero.libero import benchmark, get_libero_path
@@ -70,7 +72,10 @@ SLOW_MIN_GAP_S = float(os.environ.get('SLOW_MIN_GAP_S', '5'))  # gap between com
 STAGE_FAIL_N = int(os.environ.get('STAGE_FAIL_N', '3'))  # consecutive timeout/stall + unchanged gripper -> sync slow-think
 FAIL_RESULTS = frozenset({'timeout', 'stalled'})
 OPEN_MAX = 0.08  # Panda gripper spec (robot spec, not scene)
+FINE_STEPS = FS.enabled_flag()  # merge bounded fine-step intents; unset/0 leaves the loaded library unchanged
 LIB = json.load(open(LIBP))
+if FINE_STEPS:
+    FS.apply_fine_steps(LIB, True)
 validate(LIB)  # Reject invalid libraries before creating a simulator or making model calls.
 ASK_ASTRA_NAMES = frozenset({'ask_astra', 'consult_astra'})
 GATE_JEV = os.environ.get('GATE_JEV', '1') != '0'  # spectator Jev gate (旁观者清); 0 disables
@@ -638,6 +643,7 @@ def namespace():
     ns = {'tcp': tcp, 'opening': opening(), 'left_contact': l, 'right_contact': r, 'contact': c, 'ever_contact': EP['ever_contact'],
           'closed_cmd': EP['closed'], 'released': EP['released'], 'seen_held': PER['seen_held'],
           'grasp': g, 'objc': PER['objc'], 'place': PER['place'], 'obj_h': PER['obj_h'], 'obj_w': PER['obj_w'], 'clear': PER['clear'], 'open_max': OPEN_MAX,
+          'fine_unit': FS.FINE_UNIT_M,
           'tcp_at_close': EP['tcp_at_close'] if EP['tcp_at_close'] is not None else tcp,
           'opening_at_close': EP['opening_at_close'] if EP['opening_at_close'] is not None else opening(),
           'n_same': EP['n_same'], 'step': EP['step'], 'n_close': EP['n_close'], 'n_relook': P['relook'], 'prev': EP['prev'],
@@ -662,7 +668,9 @@ def facts(ns, preds):
          'times_closed': ns['n_close'], 'released_since_close': ns['released'], 'astra_says_object_held': ns['seen_held'],
          'grasp_point_estimate_m': r3(ns['grasp']), 'object_top_centre_estimate_m': r3(ns['objc']), 'place_point_estimate_m': r3(ns['place']),
          'object_height_estimate_m': round(ns['obj_h'], 3), 'previous_intent': ns['prev'], 'decisions_in_previous_intent': ns['n_same'], 'last_intent_result': ns.get('last_result', 'none')}
-    f.update(preds); return f
+    f.update(preds)
+    f.update(FS.fine_step_fact(FINE_STEPS, EP.get('last_fine_step')))
+    return f
 
 def servo(target, grip, gain=1.0, max_steps=60, tol=.006):
     last = eef(); stall = 0
@@ -1631,6 +1639,43 @@ def do_relook(reason):
         return 'relooked_matched' if matched else 'relooked_unmatched'
     except Exception as e: return 'relook_error'
 
+def _remember_fine_step(rep):
+    EP['last_fine_step'] = rep
+    EP.setdefault('fine_step_events', []).append(dict(rep))
+
+def _execute_fine_step(it, ns):
+    """Servo one clamped world-axis correction. Does not change the gripper command."""
+    name = it.get('name', 'fine_step')
+    closed_before = bool(EP.get('closed'))
+    tcp_now = np.asarray(eef(), float).reshape(3)
+    try:
+        raw = np.asarray(dsl.evaluate(it['refpoint'], ns), float).reshape(3)
+    except Exception:
+        rep = FS.fine_step_report(name, 'refpoint_error', tcp_now, np.zeros(3), closed_before)
+        _remember_fine_step(rep)
+        return 'refpoint_error'
+    tgt, delta, status = FS.clamp_fine_target(tcp_now, raw)
+    if status != 'ok':
+        rep = FS.fine_step_report(name, 'rejected', tcp_now, np.zeros(3), closed_before)
+        _remember_fine_step(rep)
+        return 'rejected'
+    if float(np.linalg.norm(delta)) < FS.FINE_STEP_TOL_M:
+        r = 'at_target'
+    else:
+        # Keep the current approach yaw/tilt (PATCH / RSHAPE / perception). Do not invent a new orientation.
+        SHAPE.update(tilt=0.0, tdir=0.0, yaw=None)
+        try:
+            gain = float(dsl.evaluate(str(it.get('gain', '1')), ns))
+        except Exception:
+            gain = 1.0
+        grip = 1 if closed_before else -1
+        r = servo(tgt, grip, gain, max_steps=FS.FINE_STEP_MAX_STEPS, tol=FS.FINE_STEP_TOL_M)
+    if r in ('reached', 'at_target'):
+        _clear_reapproach_if_aligned('fine_step')
+    rep = FS.fine_step_report(name, r, eef(), delta, bool(EP.get('closed')))
+    _remember_fine_step(rep)
+    return r
+
 def execute(name, ns):
     it = {i['name']: i for i in LIB['intents']}[name]
     act = it.get('action', 'move'); fing = it.get('fingers', 'keep')
@@ -1638,6 +1683,7 @@ def execute(name, ns):
         return do_ask_astra(f'jev_intent:{name}')
     if act == 'relook': return do_relook('library rule chose relook')
     if act == 'finish': return 'finish'
+    if act == 'fine_step': return _execute_fine_step(it, ns)
     if fing == 'close' and not EP['closed']:
         # HARD GATE: null/false/unsure goal identity ⇒ force relook, refuse close until matched. Uncertain ≠ proceed.
         # When relook budget is exhausted, DO NOT freeze: raise + relative approach change + escape look.
@@ -2715,7 +2761,13 @@ try:
         # grip change clears stage-fail streak debounce so a later stuck phase can fire again
         if len(EP['grip_hist']) >= 2 and EP['grip_hist'][-1] != EP['grip_hist'][-2]:
             EP['stage_fail_mark'] = 0
-        log(dec=dec, t=T[0], intent=it, forced=forced, result=r, facts=f)
+        _fs = EP.get('last_fine_step')
+        if isinstance(_fs, dict) and _fs.get('intent') == it:
+            f = dict(f)
+            f.update(FS.fine_step_fact(True, _fs))
+            log(dec=dec, t=T[0], intent=it, forced=forced, result=r, facts=f, fine_step=_fs)
+        else:
+            log(dec=dec, t=T[0], intent=it, forced=forced, result=r, facts=f)
         # Codex planning help: ask_astra already ran sync in execute; else hard-force; else spectator gate; else normal slow-think
         if r != 'finish' and not DONE[0] and T[0] < HORIZON:
             skip = {'rate_limited', 'skip_at_target', 'skip_finish', 'disabled', 'done', 'slow_cap', 'async_busy',
@@ -2789,6 +2841,9 @@ res.update(success=bool(DONE[0]), end_reason=end, env_steps=T[0], decisions=dec,
            place_force_release_reason=EP.get('place_force_release_reason'),
            place_lower_stall_n=int(EP.get('place_lower_stall_n', 0)),
            place_lift_lower_cycles=int(EP.get('place_lift_lower_cycles', 0)))
+if FINE_STEPS or EP.get('fine_step_events'):
+    res['fine_steps_enabled'] = bool(FINE_STEPS)
+    res['fine_step_events'] = list(EP.get('fine_step_events') or [])
 json.dump(res, open(os.path.join(ep_dir, 'result.json'), 'w'), indent=1, default=lambda o: np.asarray(o).tolist())
 print(json.dumps({k: res[k] for k in ('suite', 'task_id', 'init', 'success', 'end_reason', 'env_steps', 'decisions', 'astra_cost_usd', 'slow_interventions', 'close_refusals', 'wall_s') if k in res}))
 if VID: VID.stdin.close(); VID.wait()

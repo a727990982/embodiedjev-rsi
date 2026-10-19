@@ -67,6 +67,19 @@ PYTHONPATH=/path/to/bench/common python libero_rsi/run_ep_fbpatch.py SUITE TID I
 
 A failed start plan stops the episode before Jev decisions and is recorded as `harness_error`. Libraries are validated before environment creation. Recovery-rule errors are logged and end the episode with `harness_error`, rather than silently continuing with potentially partial state changes.
 
+## Fine-step menu
+
+Default off. `FINE_STEPS=1` merges `libero_rsi/libs/ee_pg_fine_steps.json` into whichever library the episode was given, before validation. Unset or `FINE_STEPS=0` leaves that library byte-for-byte as loaded. `ee_pg_easy_v2_lib.json` and `ee_pg_lib_frozen.json` are not edited.
+
+The merged intents are single-axis world translations of five millimetres, one centimetre, and three centimetres on ±x, ±y, and ±z. The harness clamps each one to three centimetres per axis, servos it on the existing move path, and keeps the current gripper command. The next Jev state reports the servo result and the new end-effector position in `observed_facts.last_fine_step` (`last_fine_step_text` is the same sentence).
+
+Do not pass the overlay file alone: it is not a pick-and-place menu. Suggested ablation, same suite, tasks, and init seeds, library `libero_rsi/libs/ee_pg_easy_v2_lib.json`:
+
+- Baseline: `FINE_STEPS` unset.
+- Fine steps: `FINE_STEPS=1`.
+
+The episode score is `success` in `result.json` (official LIBERO check). Success rate is the mean of `success` over seeds. Also record `decisions`, `jev_calls`, `gate_jev_calls`, `astra_calls` (perception and identity), and `planning_calls` (start plan and slow-think, including `ask_astra`). When the flag is on, `result.json` also has `fine_steps_enabled` and `fine_step_events`; both keys are omitted on a baseline run.
+
 ## Smoke tests
 
 From the repo root (Python 3; `numpy` and Pillow for the tests that import them):
