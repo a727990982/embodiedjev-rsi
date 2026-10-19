@@ -17,7 +17,7 @@ class VideoTests(unittest.TestCase):
             front=np.full((512,512,3),[180,20,20],dtype=np.uint8)
             wrist=np.full((512,512,3),[20,180,20],dtype=np.uint8)
             step=[12]
-            scope=functions('_start_video','vid_frame',_I=Image,_D=ImageDraw,
+            scope=functions('_start_video','vid_frame',Image=Image,ImageDraw=ImageDraw,
                 obs={'agentview_image':front,'robot0_eye_in_hand_image':wrist,
                      'robot0_gripper_qpos':[0.02,-0.02]},
                 T=step,HORIZON=1200,DONE=[False],

@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 from test_review_regressions import functions
 
-HARNESS = Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py'
+import harness_source
 
 
 def should_open_on_intervention(*, closed, igo_n, issue=None, failure_class=None):
@@ -21,11 +21,11 @@ def effective_grasp(per, patch, rshape_dz=0.0):
 
 
 def main():
-    src = HARNESS.read_text()
+    src = harness_source.read()
     ast.parse(src)
     for needle in (
         'recovery_mutated', 'post_recovery_ns_refresh',
-        'ns_gate, preds_gate = namespace()', 'f_gate = facts(ns_gate, preds_gate)',
+        'ns_gate, preds_gate = observation.namespace()', 'f_gate = observation.facts(ns_gate, preds_gate)',
         '_should_open_on_intervention',
     ):
         assert needle in src, f'missing: {needle}'

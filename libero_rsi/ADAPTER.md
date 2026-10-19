@@ -6,7 +6,7 @@ Run from the repository root:
 python libero_rsi/run_ep_fbpatch.py SUITE TID INIT LIBRARY.json OUTDIR [nofallback]
 ```
 
-`SUITE` is a LIBERO benchmark registry key; `TID` and `INIT` select the task and initial state. The entry point is a top-level script and should not be imported to inspect its helpers.
+`SUITE` is a LIBERO benchmark registry key; `TID` and `INIT` select the task and initial state. The script only calls `harness.episode.main`; the harness modules can be imported (with `libero_rsi/` on `sys.path`) without LIBERO, which is loaded when an episode starts. One episode runs per process: shared state lives in `harness.state`.
 
 ## External dependencies
 
@@ -159,7 +159,7 @@ the deterministic recovery controller.
 
 Each async job owns detached nested state, an image file, and a private result box. The worker never reads live `EP`, `PATCH`, `GOAL_TARGET` or decision files. Only the main thread applies results and writes decision log events. Job IDs reject abandoned jobs. Decision age, target revision, gripper command, close-attempt count, and identity state are checked before applying async advice. Shutdown joins active/orphan CLI calls and harvests their records without applying further actions. Each CLI subprocess has a timeout.
 
-Libraries must pass `validate.py` before a simulator is created. A recovery exception is logged with its rule ID and terminates the episode as `harness_error`; there is no rollback for partially executed robot actions.
+Libraries must pass `validate.py` before a simulator is created. A recovery exception is logged with its rule ID and terminates the episode as `harness_error`; there is no rollback for partially executed robot actions. Exceptions from motion, grasp confirmation, stall feedback and place-phase counting also end the episode as `harness_error`. Model-call failures return their fallback results. Diagnostics and DSL fallback failures continue, but each is recorded via `state.warn`/`state.nonfatal` as a `harness_warning` log line and in `result.json` `nonfatal_errors`.
 
 The monitor receives the initial plan, current todo/active goal, controller facts and episode lessons. Todo and active goal are detached with the asynchronous snapshot. A plan's `relook` step invokes visual perception; keypoints included in a planning reply trigger a visual refresh rather than replacing the perception base directly. Start-planning failures prevent entry into the Jev loop.
 

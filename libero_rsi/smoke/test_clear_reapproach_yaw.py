@@ -2,7 +2,7 @@
 import ast
 from pathlib import Path
 
-HARNESS = Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py'
+import harness_source
 
 
 def explicit_yaw(new_y, old_per_yaw, cmd_yaw, eps=15.0):
@@ -27,7 +27,7 @@ def restore(old_patch, explicit):
 
 
 def main():
-    src = HARNESS.read_text()
+    src = harness_source.read()
     ast.parse(src)
     assert "src == 'escape_look'" in src
     assert 'cmd_yaw' in src or 'old_cmd_yaw' in src

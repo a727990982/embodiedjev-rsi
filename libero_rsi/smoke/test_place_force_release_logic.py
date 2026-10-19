@@ -1,11 +1,11 @@
 """Logic smoke: place-phase force release on lower thrash (no MuJoCo)."""
 from pathlib import Path
 
-HARNESS = Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py'
+import harness_source
 LIB = Path(__file__).resolve().parents[1] / 'libs' / 'ee_pg_easy_v2_lib.json'
 
 def main():
-    src = HARNESS.read_text()
+    src = harness_source.read()
     assert 'MAX_PLACE_LOWER_STALL' in src
     assert 'MAX_PLACE_LIFT_LOWER_CYCLES' in src
     assert 'def _tcp_near_place_region' in src

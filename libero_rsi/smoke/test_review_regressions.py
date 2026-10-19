@@ -5,9 +5,12 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -15,15 +18,53 @@ import coding_agent_slow as CAS
 import jev_experience as JX
 import task_todo as TODO
 import validate
+from harness.state import Runtime
 
-TREE = ast.parse((ROOT / 'run_ep_fbpatch.py').read_text())
+MODULES = {path.stem: path for path in sorted((ROOT / 'harness').glob('*.py'))}
+TREES = {name: ast.parse(path.read_text()) for name, path in MODULES.items()}
+DEFINED_IN = {node.name: name for name, tree in TREES.items()
+              for node in tree.body if isinstance(node, ast.FunctionDef)}
+RUNTIME_NAMES = frozenset(vars(Runtime()))
+
+
+class _Scope(dict):
+    """Flat test bindings, mirrored to `rt.<name>` and `<module>.<name>` as the harness code refers to them."""
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if key in RUNTIME_NAMES:
+            setattr(self['rt'], key, value)
+        if key in DEFINED_IN:
+            setattr(self[DEFINED_IN[key]], key, value)
 
 
 def functions(*names, **bindings):
-    nodes = [node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name in names]
-    assert len(nodes) == len(names)
-    scope = {'json': json, 'os': __import__('os'), **bindings}
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(ROOT / 'run_ep_fbpatch.py'), 'exec'), scope)
+    """Compile the named harness functions alone, with test doubles for everything they reference."""
+    found = [(DEFINED_IN[name], node) for name in names for node in TREES[DEFINED_IN[name]].body
+             if isinstance(node, ast.FunctionDef) and node.name == name]
+    assert len(found) == len(names)
+    scope = _Scope(json=json, os=__import__('os'))
+    warnings = []
+
+    def warn(where, exc, once=False, **ctx):
+        warnings.append({'where': where, 'error': f'{type(exc).__name__}: {exc}', **ctx})
+
+    @contextmanager
+    def nonfatal(where, **ctx):
+        try:
+            yield
+        except Exception as exc:
+            scope['warn'](where, exc, **ctx)
+
+    dict.update(scope, NONFATAL=warnings, warn=warn, nonfatal=nonfatal)
+    dict.__setitem__(scope, 'rt', SimpleNamespace())
+    for module in MODULES:
+        dict.__setitem__(scope, module, SimpleNamespace())
+    for key, value in bindings.items():
+        scope[key] = value
+    for module, node in found:
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(MODULES[module]), 'exec'), scope)
+        scope[node.name] = dict.__getitem__(scope, node.name)
     return scope
 
 
@@ -205,17 +246,72 @@ class RegressionTests(unittest.TestCase):
         self.assertNotIn('codex_plan', events)
 
     def test_recovery_error_is_logged_and_propagated(self):
-        loop = next(n for n in ast.walk(TREE) if isinstance(n, ast.For)
-                    and isinstance(n.target, ast.Name) and n.target.id == 'rc')
         events = []
         def fail(*args):
             raise ValueError('bad trigger')
-        scope = dict(LIB={'recoveries': [{'id': 'broken', 'trigger': 'bad'}]},
-                     forced=None, dsl=SimpleNamespace(evaluate=fail), ns={}, dec=3, T=[7],
-                     log=lambda **kw: events.append(kw))
+        scope = functions('_apply_recovery_rules',
+                          LIB={'recoveries': [{'id': 'broken', 'trigger': 'bad'}]},
+                          dsl=SimpleNamespace(evaluate=fail), dec=3, T=[7],
+                          log=lambda **kw: events.append(kw))
         with self.assertRaisesRegex(ValueError, 'bad trigger'):
-            exec(compile(ast.Module(body=[loop], type_ignores=[]), '<recovery>', 'exec'), scope)
+            scope['_apply_recovery_rules']({}, {}, None)
         self.assertEqual(events[0]['recovery_error'], 'broken')
+
+    def test_retreat_lifts_to_clearance_above_numpy_grasp(self):
+        moves = []
+        scope = functions('_retreat_for_global_view', _raise_tcp=lambda scale, max_steps: 0.1,
+                          EP={'closed': False}, PER={'grasp': np.array([0., 0., 0.3]), 'obj_h': 0.05},
+                          eef=lambda: np.array([0., 0., 0.2]),
+                          servo=lambda tgt, *args, **kwargs: moves.append(np.asarray(tgt).copy()), np=np)
+        scope['_retreat_for_global_view']()
+        self.assertEqual(len(moves), 1)
+        self.assertAlmostEqual(float(moves[0][2]), 0.45)
+
+    def test_nonfatal_records_diagnostic_failures_once_when_asked(self):
+        from harness import state
+        state.reset()
+        with state.nonfatal('diag_write', step_kind='test'):
+            raise OSError('disk full')
+        for _ in range(3):
+            state.warn('predicate', ValueError('bad expr'), once=True, name='near_goal')
+        state.warn('predicate', ValueError('bad expr'), once=True, name='other')
+        self.assertEqual([(w['where'], w.get('name')) for w in state.NONFATAL],
+                         [('diag_write', None), ('predicate', 'near_goal'), ('predicate', 'other')])
+        self.assertEqual(state.NONFATAL[0]['error'], 'OSError: disk full')
+        with self.assertRaises(KeyboardInterrupt), state.nonfatal('interrupt'):
+            raise KeyboardInterrupt
+        state.reset()
+        self.assertEqual(state.NONFATAL, [])
+
+    def test_nonfatal_survives_warning_log_write_and_flush_failures(self):
+        from harness import state
+
+        class BrokenLog:
+            closed = False
+
+            def __init__(self, operation):
+                self.operation = operation
+
+            def write(self, text):
+                if self.operation == 'write':
+                    raise OSError('injected write failure')
+
+            def flush(self):
+                if self.operation == 'flush':
+                    raise OSError('injected flush failure')
+
+        self.addCleanup(state.reset)
+        for operation in ('write', 'flush'):
+            with self.subTest(operation=operation):
+                state.reset()
+                state.rt.logf = BrokenLog(operation)
+                with state.nonfatal('diagnostic_log'):
+                    state.log(diagnostic=True)
+                self.assertEqual(len(state.NONFATAL), 1)
+                record = state.NONFATAL[0]
+                self.assertEqual(record['where'], 'diagnostic_log')
+                self.assertEqual(record['error'], f'OSError: injected {operation} failure')
+                self.assertEqual(record['log_error'], f'OSError: injected {operation} failure')
 
     def test_all_shipped_libraries_validate(self):
         for path in (ROOT / 'libs').rglob('*.json'):

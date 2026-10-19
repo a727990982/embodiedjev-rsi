@@ -5,7 +5,8 @@ Public snapshot of the LIBERO RSI / EmbodiedJev harness. This repo had no prior 
 | Path | Role |
 |---|---|
 | `libero_rsi/coding_agent_slow.py` | Codex CLI transport for start planning, slow-think, Astra perception and identity checks. |
-| `libero_rsi/run_ep_fbpatch.py` | Episode harness: Jev intents, stall feedback, grasp confirm, local-deadend relook, place force-release. Needs LIBERO, MuJoCo, Codex CLI, and the Jev client to actually roll out. |
+| `libero_rsi/run_ep_fbpatch.py` | Command-line entry point for one episode. Needs LIBERO, MuJoCo, Codex CLI, and the Jev client to actually roll out. |
+| `libero_rsi/harness/` | Episode harness package: Jev intents, stall feedback, grasp confirm, local-deadend relook, place force-release. The module map is in `harness/__init__.py`; it can be imported without the simulator. |
 | `libero_rsi/jev_experience.py` | Builds library advice for Astra/Codex planning; cached predicates are not Jev input. |
 | `libero_rsi/jev_todo.py` | Jev completion questions, classification records, and atomic progress updates. |
 | `libero_rsi/task_todo.py` | Task objectives, evidence-backed progress, and active object selection. |
@@ -174,7 +175,7 @@ text-only model. The [TypeSafe image protocol](https://docs.typesafe.ai/images)
 is used for acting, spectator decisions and todo reviews.
 
 Real rollouts also require an authenticated Codex CLI, LIBERO with its assets,
-MuJoCo/robosuite, SciPy, NumPy, Pillow, `ffmpeg` with libx264, and rendering dependencies. `astra_client`
+MuJoCo/robosuite, the packages in `requirements.txt`, `ffmpeg` with libx264, and rendering dependencies. `astra_client`
 and an external `jev_choice` are not needed. After configuring credentials and
 dependencies:
 
@@ -189,7 +190,9 @@ front/wrist views and step/action captions. Encoding uses one CPU thread. Set
 exit code. A missing ffmpeg fails before model calls instead of silently omitting
 the recording.
 
-A failed start plan stops the episode before Jev decisions and is recorded as `harness_error`. Libraries are validated before environment creation. Recovery-rule errors are logged and end the episode with `harness_error`, rather than silently continuing with potentially partial state changes.
+A failed start plan stops the episode before Jev decisions and is recorded as `harness_error`. Libraries are validated before environment creation. Recovery-rule errors are logged and end the episode with `harness_error`, rather than silently continuing with potentially partial state changes. The same applies to any exception from robot motion, grasp confirmation, stall feedback, or place-phase bookkeeping: the traceback goes to `result.json` under `error`.
+
+Only two kinds of failure are survivable. External model calls (Astra perception, identity checks, Codex planning) have their documented fallback results such as `relook_error` or `sync_error:...`. Diagnostics (log records, image dumps, environment teardown) and library DSL fallbacks (a predicate that fails evaluates to false; a bad `gain` uses 1.0) are recorded rather than swallowed: each one appears as a `harness_warning` line in `decisions.jsonl` and in the `nonfatal_errors` list in `result.json`.
 
 ## Fine-step menu
 
@@ -206,17 +209,19 @@ The episode score is `success` in `result.json` (official LIBERO check). Success
 
 ## Smoke tests
 
-From the repo root (Python 3; `numpy` and Pillow for the tests that import them):
+From the repo root, with Python 3:
 
 ```bash
-failed=0
-for t in libero_rsi/smoke/test_*.py; do
-  python "$t" || failed=1
-done
-test "$failed" -eq 0
+pip install -r requirements.txt
+python libero_rsi/smoke/run_all.py
 ```
 
-Each test adds `libero_rsi/` to `sys.path`, so `validate` and `dsl_libero` resolve as siblings. NumPy and Pillow are required for the tests that import them. No simulator and no network.
+`run_all.py` checks for NumPy, Pillow and SciPy first and names any that are
+missing, then runs each `smoke/test_*.py` in its own process and prints the
+output of failing tests (`-v` prints all output). It exits 1 if a test fails
+and 2 if a package is missing. The video test is skipped without `ffmpeg`. A
+single test can also be run directly, e.g. `python libero_rsi/smoke/test_stage_todo.py`.
+No simulator and no network.
 
 The regression suite executes selected production functions with environment/model doubles, covering identity authorization, fixed backend routing and Codex failure handling, event timestamps, async snapshots, diagnostic isolation, recovery failures, and validation of every shipped library. These tests do not establish simulation success.
 

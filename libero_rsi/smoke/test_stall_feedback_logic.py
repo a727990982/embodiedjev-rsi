@@ -8,7 +8,7 @@ import validate as V
 import dsl_libero as dsl
 
 LIB = json.load(open(Path(__file__).resolve().parents[1] / 'libs' / 'ee_pg_easy_v2_lib.json'))
-HARNESS = Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py'
+import harness_source
 
 def eval_preds(ns):
     preds = {}
@@ -160,7 +160,7 @@ def main():
     assert abs(rel_yaw({'left_contact': True, 'right_contact': False}, 0)) == 45.0
 
     # 8) clear_reapproach must NOT call relative approach yaw change in harness
-    hsrc = HARNESS.read_text()
+    hsrc = harness_source.read()
     i0 = hsrc.find("elif action == 'clear_reapproach':")
     assert i0 > 0
     # End at the unknown-action else (after clear's note), not the inner "no pad signal" else.

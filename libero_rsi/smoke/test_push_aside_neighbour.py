@@ -10,7 +10,7 @@ import validate as V
 import dsl_libero as dsl
 
 LIB = json.load(open(Path(__file__).resolve().parents[1] / 'libs' / 'ee_pg_easy_v2_lib.json'))
-HARNESS = Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py'
+import harness_source
 
 NEIGHBOUR_STALL_ISSUES = ('blocked_by_neighbour', 'tip_push', 'object_pushed_by_descent')
 STALL_FB_ACTIONS = (
@@ -79,7 +79,7 @@ def base_ns(**kw):
 
 def main():
     V.validate(LIB)
-    src = HARNESS.read_text()
+    src = harness_source.read()
     ast.parse(src)
     for needle in (
         "STALL_FB_ACTIONS", "_execute_push_aside", "_neighbour_block_hint",

@@ -1,5 +1,4 @@
 """Fine-step menu: default off, clamped, servoed, reported. No simulator."""
-import ast
 import json
 import os
 import sys
@@ -14,20 +13,15 @@ sys.path.insert(0, str(ROOT))
 import dsl_libero as dsl
 import fine_steps as FS
 import validate as V
+from test_review_regressions import functions
 
-HARNESS = ROOT / 'run_ep_fbpatch.py'
 V2 = ROOT / 'libs' / 'ee_pg_easy_v2_lib.json'
 FROZEN = ROOT / 'libs' / 'ee_pg_lib_frozen.json'
 OVERLAY = ROOT / 'libs' / 'ee_pg_fine_steps.json'
 
 
 def load_funcs(*names, **bindings):
-    tree = ast.parse(HARNESS.read_text())
-    nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in set(names)]
-    assert len(nodes) == len(set(names))
-    scope = {'np': np, **bindings}
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(HARNESS), 'exec'), scope)
-    return scope
+    return functions(*names, **{'np': np, **bindings})
 
 
 def _ns(tcp):

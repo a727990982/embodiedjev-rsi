@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import coding_agent_slow as CAS
+import harness_source
 
 
 def main():
@@ -93,7 +94,7 @@ def main():
     assert 'Reply ONLY one JSON object' in prompt
 
     # 6) Harness still documents CODING_AGENT_SLOW hook
-    harness = (Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py').read_text()
+    harness = harness_source.read()
     assert 'coding_agent_slow' in harness
 
     print(json.dumps({

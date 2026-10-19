@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import validate as V
 
-HARNESS = Path(__file__).resolve().parents[1] / 'run_ep_fbpatch.py'
+import harness_source
 LIBP = Path(__file__).resolve().parents[1] / 'libs' / 'ee_pg_easy_v2_lib.json'
 
 ASK_ASTRA_NAMES = frozenset({'ask_astra', 'consult_astra'})
@@ -65,7 +65,7 @@ def shared_budget_after_consult(slow_used, intervened):
 
 
 def main():
-    src = HARNESS.read_text()
+    src = harness_source.read()
     ast.parse(src)
     for needle in (
         'ASK_ASTRA_NAMES', '_ensure_ask_astra_intents', 'def do_ask_astra(',
