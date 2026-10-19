@@ -25,9 +25,9 @@ Do not predict what the next action will accomplish. Only the environment's
 official success signal establishes full task success.'''
 
 
-def review(state, *, assets, reason):
+def review(state, *, todo, assets, reason):
     """One multi-question request, followed by an atomic host-side todo update."""
-    todo = deepcopy(state['task_todo'])
+    todo = deepcopy(todo)
     todo.pop('note', None)
     step = state['observation_step']
     questions = {}
@@ -45,6 +45,15 @@ def review(state, *, assets, reason):
                 'unobserved': f'The required object/region is occluded or outside the views, so this cannot be checked: {condition}',
             },
         }
+        if item['progress']['awaiting_placement_review']:
+            questions[f'regrasp_{index}'] = {
+                'type': 'choice',
+                'instructions': INSTRUCTIONS + '\nJudge whether this released target needs a new grasp: ' + subject,
+                'criteria': {
+                    'yes': 'The released target visibly missed or fell out of its destination; another grasp is needed.',
+                    'no': 'The target is placed; only withdrawing the hand, settling, or visual verification remains.',
+                    'uncertain': 'Current images do not establish whether a new grasp is needed.'},
+            }
     # Hide old verdicts from the classifier. Keep them locally for occlusion
     # preservation and rollback; the host never infers success from an action.
     review_state = deepcopy(state)
@@ -59,6 +68,8 @@ def review(state, *, assets, reason):
                      # Choice answers do not include a free-text visual rationale.
                      'evidence': f"Jev {JC.MODEL} classified {answer['choice']} at step {step}; "
                                  'see logged current frames, completion question and probabilities.'})
+        if item['progress']['awaiting_placement_review']:
+            rows[-1]['needs_regrasp'] = {'yes':True,'no':False,'uncertain':None}[answers[f'regrasp_{index}']['choice']]
     updated = TODO.apply_review(todo, {'items': rows}, step)
     return updated, {'model': JC.MODEL, 'observation_step': step,
                      'reason': reason, 'latency_s': latency,

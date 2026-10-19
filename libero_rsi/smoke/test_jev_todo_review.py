@@ -29,6 +29,7 @@ def response(statuses):
 
 class JevTodoTests(unittest.TestCase):
     def observation(self, t=None, step=27):
+        self.canonical_todo = deepcopy(t or todo())
         return JO.build_state('put cheese and butter in basket', t or todo(), proprio(),
             {'front': np.full((8, 8, 3), 70, dtype=np.uint8),
              'wrist': np.full((8, 8, 3), 90, dtype=np.uint8)}, step)
@@ -38,7 +39,7 @@ class JevTodoTests(unittest.TestCase):
                 patch.object(JC, 'urlopen') as transport, \
                 patch.object(CAS, 'call_codex', side_effect=AssertionError('Must use Jev')):
             transport.return_value.__enter__.return_value.read.return_value = json.dumps(reply).encode()
-            updated, rec = JT.review(state, assets=assets, reason='open_gripper:opened')
+            updated, rec = JT.review(state, todo=self.canonical_todo, assets=assets, reason='open_gripper:opened')
             self.request = json.loads(transport.call_args.args[0].data)
         return updated, rec
 
@@ -81,6 +82,22 @@ class JevTodoTests(unittest.TestCase):
         reopened, _ = self.review(state, assets, response(['pending', 'pending']))
         self.assertEqual(reopened['active_id'], 'cheese')
         self.assertEqual(reopened['items'][0]['checked_at_step'], 28)
+
+    def test_post_release_review_preserves_or_reopens_stages(self):
+        for choice, expected in [('yes',False),('no',True),('uncertain',True)]:
+            prior=todo()
+            prior['items'][0]['progress']['awaiting_placement_review']=True
+            state,assets=self.observation(prior)
+            reply=response(['pending','pending'])
+            reply['answers']['regrasp_0']={'choice':choice,'probabilities':{
+                key:float(key==choice) for key in ('yes','no','uncertain')}}
+            updated,_=self.review(state,assets,reply)
+            self.assertEqual(updated['items'][0]['progress']['awaiting_placement_review'],expected)
+            self.assertIn('last_visual_review',TODO.decision_view(updated)['items'][0])
+            self.assertIn('regrasp_0',self.request['questions'])
+            del reply['answers']['regrasp_0']
+            with self.assertRaises(ValueError):self.review(state,assets,reply)
+            self.assertTrue(prior['items'][0]['progress']['awaiting_placement_review'])
 
     def test_partial_or_invalid_service_answers_cannot_commit_any_completion(self):
         replies = []

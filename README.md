@@ -25,12 +25,58 @@ visual completion condition. A multi-object task has one complete outcome per
 requested object. Planning never marks an item done. The current todo is saved
 in `task_todo.json`, with updates also recorded in `decisions.jsonl`.
 
+Each object has six nested progress checkpoints: verify identity, secure grasp,
+lift clear, carry above the destination, lower for release, and release/retreat
+with verified final placement. The executor refreshes these before decisions and
+after actions/recovery using grasp confirmation, current tactile support and
+completed motion results. After a confirmed grasp and completed lift, Jev sees
+those checkpoints checked and `next_stage=carry_to_destination`. Losing the
+grasp or reopening prematurely resets the dependent checkpoints. A refreshed
+localization invalidates old motion waypoints. These updates make no model calls
+and do not change the active object or force an action sequence.
+
+Jev sees older scene descriptions under `last_visual_review`, separate from the
+fresh `progress` and `current_grasp_confirmed` fields. A pending final outcome
+does not mean grasping failed. An expected release still awaits visual placement
+review; sending an open command never checks off the final outcome. Successful
+placement can make an unobserved intermediate checkpoint `not_required`, which
+does not claim that the corresponding motion was executed.
+
 Acting Jev receives the todo, current front/wrist images (wrist when available),
 end-effector pose, finger joint positions/opening, commanded open/closed state,
-per-finger contacts and official success. All images and sensors come from the
-same simulation step, after any recovery motion. Jev no longer receives cached
-`seen_held`, `at_grasp`, `above_place`, grasp/place coordinates, predicate meanings,
-active recovery matches or a static phase-order prior as current facts.
+per-finger contacts and official success. Current images and sensors come from the
+same simulation step, after any recovery motion. `motion_context` adds robot-part
+contact locations (including palm/arm and fixtures), the last requested/actual
+movement and remaining error, plus a visual-waypoint proximity check. Failed
+motion before-images and startup obstacle advice are explicitly historical.
+Commanded waypoints are estimates, never simulator object truth or a certificate
+of a collision-free path. Cached `seen_held` and library predicates are not sent.
+
+Acting Jev additionally receives the last eight completed intent/result pairs,
+plus the consecutive count of the same intent and the same intent/result pair.
+Counts cover the full trailing streak even when it exceeds eight actions.
+These are past executor outcomes, not assertions about the current scene or
+task completion. The instructions explain stage progress and preserving a
+confirmed grasp. Candidate and executor checks reject closes above/off the grasp
+position, opening/reapproach motions that would discard a supported target grasp,
+and release before the destination waypoint. An unchanged failed motion requires
+a changed target/orientation or an executed back-off before retry.
+`lift`, `carry_to_place` and `lower_to_place` are offered only with a confirmed
+target grasp supported by current gripper contacts/opening. The executor repeats
+this check, including for forced actions, and never implicitly closes an empty
+gripper for a transport request. A failed close returns
+`grasp_failed:transport_not_executed`; a blocked transport returns
+`<intent>_not_executed:grasp_unconfirmed`. These failure results enter the next
+Jev history and trigger the existing failure/todo-review paths.
+
+Astra's startup assessment receives an annotated TCP approach/descent route,
+visual waypoint estimates, commanded orientation and finger opening. It reports
+clear/risk/uncertain, the affected phase/robot part and a suggested recovery.
+Jev can choose `back_off` (preserves grip), `clear_reapproach`, or
+`change_approach_yaw` using the existing recovery executor. General slow-think
+uses `MAX_SLOW`; when that budget is exhausted, one additional **motion-stall**
+diagnosis is available if `MAX_SLOW > 0` and fallback is enabled. It is spent even
+on a failed API request. No unbounded retry or runtime code change is introduced.
 
 Candidates describe applicability and actual motion. An empty closed gripper
 should reopen; `reopen_and_retry` opens **at the current pose**, leaving alignment
@@ -68,6 +114,24 @@ proposal is retained for planning records and slow-think, but is not executed
 against an old target after todo localization. See [runtime contract](libero_rsi/ADAPTER.md).
 
 ## Local dead-end → synchronous global relook
+
+Recovery preparation is not a successful retry. `clear_reapproach` raises the
+open hand, recenters and adjusts the visual grasp estimate, then queues
+`move_above_object`; it never descends. Its executor result is now
+`recovery_prepared:clear_reapproach:descent_unverified`. Jev still chooses whether
+the current view supports a descent test, another approach, or help.
+
+`motion_context.recovery_validation` reports the latest preparation position/commanded orientation
+and whether a descent has been tested since. Two preparation cycles between three
+approach endpoints trigger `recovery_no_progress` when they reduce distance to the
+same visual grasp estimate by less than 6 mm and clear no robot-part contact.
+Only approach endpoints are compared: the upward retreat itself is not progress.
+Real descent attempts reset the preparation cycle; task-target changes discard
+the previous target's history. This trigger can spend the same single reserved
+diagnosis used for motion stalls, even after ordinary help is exhausted, including
+when the diagnostic request fails. The latest failed-motion report and historical
+before image remain available to that diagnosis. This detects and escalates a
+preparation loop; it does not establish that the revised recovery succeeds in physics.
 
 Repeated local stall-family actions (`push_aside`, `clear_reapproach`, `raise_redescend`, lateral recenter) without a secured grasp, or hitting the push-aside caps, abort the local loop:
 
@@ -110,7 +174,7 @@ text-only model. The [TypeSafe image protocol](https://docs.typesafe.ai/images)
 is used for acting, spectator decisions and todo reviews.
 
 Real rollouts also require an authenticated Codex CLI, LIBERO with its assets,
-MuJoCo/robosuite, SciPy, NumPy, Pillow and rendering dependencies. `astra_client`
+MuJoCo/robosuite, SciPy, NumPy, Pillow, `ffmpeg` with libx264, and rendering dependencies. `astra_client`
 and an external `jev_choice` are not needed. After configuring credentials and
 dependencies:
 
@@ -118,7 +182,27 @@ dependencies:
 python libero_rsi/run_ep_fbpatch.py SUITE TID INIT LIB.json OUTDIR
 ```
 
+Real episodes record `OUTDIR/SUITE_tTASK_iINIT/episode.mp4` by default, with
+front/wrist views and step/action captions. Encoding uses one CPU thread. Set
+`VIDEO=/path/to/episode.mp4` to choose another output path; offline tests use
+`VIDEO=''` to disable recording. The result includes the video path and encoder
+exit code. A missing ffmpeg fails before model calls instead of silently omitting
+the recording.
+
 A failed start plan stops the episode before Jev decisions and is recorded as `harness_error`. Libraries are validated before environment creation. Recovery-rule errors are logged and end the episode with `harness_error`, rather than silently continuing with potentially partial state changes.
+
+## Fine-step menu
+
+Default off. `FINE_STEPS=1` merges `libero_rsi/libs/ee_pg_fine_steps.json` into whichever library the episode was given, before validation. Unset or `FINE_STEPS=0` leaves that library byte-for-byte as loaded. `ee_pg_easy_v2_lib.json` and `ee_pg_lib_frozen.json` are not edited.
+
+The merged intents are single-axis world translations of five millimetres, one centimetre, and three centimetres on ±x, ±y, and ±z. The harness clamps each one to three centimetres per axis, servos it on the existing move path, and keeps the current gripper command. The next Jev state reports the servo result and the new end-effector position in `motion_context.last_fine_step` (`last_fine_step_text` is the same sentence).
+
+Do not pass the overlay file alone: it is not a pick-and-place menu. Suggested ablation, same suite, tasks, and init seeds, library `libero_rsi/libs/ee_pg_easy_v2_lib.json`:
+
+- Baseline: `FINE_STEPS` unset.
+- Fine steps: `FINE_STEPS=1`.
+
+The episode score is `success` in `result.json` (official LIBERO check). Success rate is the mean of `success` over seeds. Also record `decisions`, `jev_calls`, `gate_jev_calls`, `astra_calls` (perception and identity), and `planning_calls` (start plan and slow-think, including `ask_astra`). When the flag is on, `result.json` also has `fine_steps_enabled` and `fine_step_events`; both keys are omitted on a baseline run.
 
 ## Smoke tests
 

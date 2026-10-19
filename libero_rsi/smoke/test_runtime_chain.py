@@ -80,7 +80,17 @@ def fake_run(destination, fail_start=False, handoff=False):
     def choose(state, instruction, criteria, **kwargs):
         assert kwargs.get('assets'), 'Jev must receive real image assets'
         assert 'task_todo' in state and 'proprioception' in state
+        stage_progress = next(i for i in state['task_todo']['items'] if i['id']==state['task_todo']['active_id'])['progress']
+        assert len(stage_progress['stages']) == 6
+        assert stage_progress['checked_at_step'] == state['observation_step']
+        assert stage_progress['next_stage'] == 'secure_grasp'
+        assert not stage_progress['current_grasp_confirmed']
         assert 'observed_facts' not in state and 'experience_brief' not in state
+        assert not {'lift', 'carry_to_place', 'lower_to_place'} & set(criteria), 'Empty hand must not be offered transport'
+        history = state['execution_history']
+        completed = [event.split(':', 1)[1] for event in events if event.startswith('jev:') and event != 'jev:todo_review']
+        assert [r['intent'] for r in history['recent_actions']] == completed[-8:]
+        assert all(set(r) == {'intent', 'result'} for r in history['recent_actions'])
         assert set(state['proprioception']) == {'gripper_xyz_m', 'gripper_orientation_xyzw', 'finger_joint_positions_m', 'fingers_opening_m', 'gripper_closed_command', 'left_finger_contact', 'right_finger_contact'}
         chosen = next(choices)
         active_targets.append(state['task_todo']['active_id'])
@@ -113,6 +123,9 @@ def fake_run(destination, fail_start=False, handoff=False):
             raise AssertionError('Routine todo review must not call Astra')
         elif 'episode-START' in prompt:
             events.append('start_plan')
+            assert 'approach_geometry' in prompt and 'maximum_finger_opening_m' in prompt
+            assert any(Path(image).name == 'start_approach_overlay.png' for image in images)
+            assert all(Path(image).is_file() for image in images)
             if fail_start: raise RuntimeError('injected start failure')
             raw = {'matched_language_goal': True, 'issue': 'ok', 'intervene': False,
                    'task_todo': {'items': [{'id': 'butter', 'target': 'butter', 'goal': 'put butter in basket', 'completion_condition': 'butter inside basket and released'}]},
@@ -130,7 +143,7 @@ def fake_run(destination, fail_start=False, handoff=False):
     library = Path(destination)/'library.json'
     library.write_text(json.dumps(lib))
     def exit_process(code): raise SystemExit(code)
-    env = {'HORIZON': '20', 'MAX_DEC': '3', 'GATE_JEV': '0', 'SLOW_MIN_GAP_S': '0'}
+    env = {'HORIZON': '20', 'MAX_DEC': '3', 'GATE_JEV': '0', 'SLOW_MIN_GAP_S': '0', 'VIDEO': ''}
     with patch.dict(os.environ, env, clear=True), patch.object(CAS, 'call_codex', side_effect=codex), \
          patch.object(sys, 'argv', ['run_ep_fbpatch.py','fake_suite','0','0',str(library),destination]), \
          patch.object(os, '_exit', side_effect=exit_process):

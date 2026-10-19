@@ -23,11 +23,11 @@ request logs. This API returns choice probabilities, not raw model logits.
 | `jev_choice.choose(state, instructions, criteria, assets=..., meta=...)` | Returns `(choice, probabilities, latency)`; requires current image assets and rejects a wrong model or invalid candidate/probability reply. |
 
 No external `jev_choice` or `astra_client` is loaded. Astra via Codex CLI writes
-the episode-start todo and provides perception and identity verification. Jev
-reviews todo completion from current observations. Codex CLI also runs sync/async slow-think; Jev chooses per-step
+the episode-start todo and provides perception, identity verification and todo
+progress review. Codex CLI also runs sync/async slow-think; Jev chooses per-step
 intents. There is no dual mode, mock backend or text-only image fallback.
 
-Codex requires its CLI and configured authentication. Configure the slow-think model and planning effort with `CODING_AGENT_CODEX_MODEL` and `CODING_AGENT_CODEX_EFFORT`, and the executable with `CODING_AGENT_CODEX_BIN`. Perception and marked-grasp identity verification explicitly use `gpt-6-astra` with `ASTRA_EFFORT` (default `xhigh`), independently of the slow-think model override. Start planning/todo generation also pins Astra and uses the planning effort. Routine todo reviews use TypeSafe Jev 1.14, independently of Codex settings. There is no mock backend. Offline tests inject fixed replies at the CLI boundary; they do not demonstrate visual capability.
+Codex requires its CLI and configured authentication. Configure the slow-think model and planning effort with `CODING_AGENT_CODEX_MODEL` and `CODING_AGENT_CODEX_EFFORT`, and the executable with `CODING_AGENT_CODEX_BIN`. Perception and marked-grasp identity verification explicitly use `gpt-6-astra` with `ASTRA_EFFORT` (default `xhigh`), independently of the slow-think model override. Start planning/todo and todo reviews also pin Astra; they use the planning effort. There is no mock backend. Offline tests inject fixed replies at the CLI boundary; they do not demonstrate visual capability.
 
 For early recovery the harness abandons pending advice, refreshes keypoints/identity using Astra through Codex CLI, and calls synchronous Codex planning. A perception failure stops that recovery attempt; a Codex failure is recorded without invoking a separate client or substituting a mock result. Existing help-intent labels (`ask_astra`, `consult_astra`, `defer_to_astra`) keep their names in libraries/logs but route to Codex planning.
 
@@ -39,51 +39,113 @@ and individual contact booleans from one simulation step. `_jev_input` adds the
 language goal, todo and official success, encodes image assets and logs matching
 frames. Contact flags never identify the touched object.
 
-Neither acting nor spectator Jev gets cached grasp/place coordinates, `seen_held`,
-geometry-derived predicates, predicate meanings or active recovery matches.
-Spectator additionally gets actual recent intent/result events and help budgets.
-Controller geometry and predicates stay in the executor and planner context;
-they are not deleted from the system.
+Acting and spectator Jev receive `motion_context`: robot-part contacts, last
+commanded waypoint and actual displacement, remaining error, blocked intents,
+help budgets, and a close-position check against the visual grasp estimate.
+Robot contacts include fingers, palm/wrist and arm against the environment
+(including fixtures), plus self-contact. They expose no other-body names, IDs,
+poses or forces. Contact is not automatically classified as blockage.
+
+The last failed motion includes a historical front/wrist before-image, separately
+labelled from current camera assets; Astra's monitor receives the same temporal
+pair. Startup obstacle advice is also historical. The startup overlay shows only
+the proposed TCP route. Finger opening is not full hand width, and full arm
+swept-volume collision checking is absent. Astra must report uncertainty for
+occluded or otherwise unverified clearance.
+
+Acting additionally receives the last eight completed intent/result pairs and
+full trailing repetition counts, including forced high-level actions. These are
+past outcomes, not current scene truth. Todo progress retains the sensor-refreshed
+grasp flag. Cached visual held estimates, library predicates and simulator object
+poses are not included in policy input.
+
+Close requires XY and height proximity to the effective visual grasp estimate
+(including episode offsets). Tolerances are 10–15mm scaled by estimated dimensions,
+allowing controller/vision error while rejecting an above-target close. Position
+is rechecked after any identity relook, including forced execution. Refusal returns
+`close_not_executed:not_at_grasp` without closing.
+
+A supported target grasp disables opening approach/retry motions. `open_gripper`
+requires TCP XY within 4cm of the visual place point and height within 1.5cm of
+its estimated release waypoint. Identity/contact loss permits recovery again.
+This is estimated geometry, not verified object placement.
+
+An unchanged failed waypoint is withheld (6mm target / 3 degree orientation
+comparison), including forced calls. Changed geometry/orientation or successful
+back-off permits retry. `back_off` preserves the grip; `clear_reapproach` and
+`change_approach_yaw` reuse the existing executor when no current target hold is
+supported. Exhausted relook/help choices are removed. General help uses MAX_SLOW;
+one separately recorded motion diagnosis can run after exhaustion when fallback
+is enabled and MAX_SLOW > 0. Failed requests spend the slot too;
+`result.json.motion_diagnosis_used` records it.
+
+Transport candidates (`lift`, `carry_to_place`, `lower_to_place`) require a
+closed gripper, confirmed target identity, a successful grasp confirmation, and
+current tactile support. An old `grasp_secured_once` or visual held estimate
+alone cannot enable them. The executor enforces the same precondition for direct
+and forced calls; it returns `<intent>_not_executed:grasp_unconfirmed` without
+moving or closing when it fails. A failed grasp attempt returns
+`grasp_failed:transport_not_executed`, not `closed`, even if the fingers moved.
+`closed` is returned after a successful grasp confirmation. The explicit failures
+are passed to acting Jev history and existing failure/todo-review handling.
+
+Episode recording defaults to `episode.mp4` inside the episode output directory.
+It requires ffmpeg/libx264, uses one encoder thread, and includes front/wrist
+images and the actual horizon in the caption. `VIDEO` overrides the path; an
+explicit empty `VIDEO` disables recording for offline tests. Encoder completion
+is awaited before writing `result.json`, which includes `video_path` and
+`video_exit_code` when recording is enabled.
 
 The start planner must return `task_todo.items`, each with unique `id`, `target`,
 `goal`, and `completion_condition`. All start as pending, regardless of a planner
 claim of completion. Each item describes an object's desired final outcome,
 not a fixed sequence of motor commands. The first non-done item is active.
 
-After each executed intent, `jev_todo.review` receives the same current camera
-and proprioception boundary as acting Jev. It sends one Choice question per todo
-item in a single TypeSafe request, naming the exact target, desired outcome and
-completion condition. Prior status/evidence are omitted from this classifier
-input. All required conditions must hold: for placement, the requested object
-must be inside its destination and released, not merely held above it or named
-by an executed command.
+`task_todo.initialize` adds six nested checkpoints to each object: identity,
+secure grasp, lift clearance, transport, release height, and verified placement
+with clearance. Planner-supplied checkpoint completions are ignored. The main
+loop refreshes progress before selection and after execution/recovery. Identity
+uses the existing visual gate; current grasp uses the same live precondition as
+transport. Motion checkpoints require a completed `reached`/`at_target` result
+with a supported grasp. They record achieved waypoints in this grasp, not current
+object pose or collision-free-path certification. Lowering requires a previously
+reached destination checkpoint. Loss of grasp, premature reopening or identity
+loss revokes dependent checkpoints; localization/patch revision changes invalidate
+motion waypoints. These operations do not invoke a model, retarget an object,
+alter candidates, or force Jev's next intent. They are distinct from Jev's
+final-outcome review and do not turn `pending` into a grasp-failure signal.
 
-The response for each item is `done`, `pending`, `uncertain` (visible but
-ambiguous) or `unobserved` (required region/target cannot be inspected). A review
-validates the entire question set, candidate set and probability values before
-any progress is committed. `unobserved` preserves the prior status, evidence and
-timestamp. Visible contradictions reopen done items. Choice responses have no
-free-text rationale: the evidence field explicitly records a Jev classification,
-and the decision log stores the questions, probabilities, item-id mapping,
-observation step and frame references instead of fabricating an explanation.
+After a supported grasp and transport, actual `open_gripper` completion enters
+`awaiting_placement_review`; it does not complete placement. Retreat/review may
+follow without reacquiring the object. Visible placement failure resets progress;
+occlusion retains the pending review. Verified final placement completes the last
+checkpoint and marks unobserved intermediate checkpoints `not_required`, not
+fabricated `done`. Step transitions never change top-level `active_id`.
 
-The main thread performs this review synchronously before selecting the next
-intent. After committing progress, it retargets and relocalizes with Astra when
-the active object changes; only then does the separate Jev action request run.
-At the decision/horizon cap, a final non-successful scene is reviewed after
-settling, without retargeting or further motion. Official success skips that
-review and completes the remaining items with official-success evidence.
+For Jev, `decision_view` nests the old outcome evidence/timestamp under
+`last_visual_review`; current stage progress has its own timestamp. Saved todo
+artifacts retain the original review fields as well as stage progress.
 
-A changed status invalidates outstanding slow advice; an unchanged classification
-does not discard it merely because the evidence timestamp was refreshed. Target
-switches clear old grasp/approach state and require Astra identity verification.
-`task_todo.json`, decision events and the final result retain progress. All-done
-visual todos never substitute for official full-task success.
+For a pending/uncertain post-release outcome, Jev answers an additional Choice question mapped to `needs_regrasp`:
+true for visible failed placement requiring another grasp, false when only
+clearance/verification remains, or null if uncertain. Only true revokes the
+placement attempt's progress. This prevents a successful release with the gripper
+still near the rim from incorrectly restarting the grasp stages.
 
-`choose_questions(state, questions, assets=...)` returns validated answers and
-latency. `choose(...)` retains its existing single-action tuple contract.
-`todo_review_calls` counts Jev review requests separately from acting `jev_calls`
-and spectator `gate_jev_calls`; it is not included in `astra_calls`.
+After each executed intent, including forced intents,
+Jev reviews every item using a new same-frame image/sensor snapshot. A complete
+review returns each id with `pending`, `done`, `uncertain` or `unobserved` and an
+classification record linked to frames and probabilities. `unobserved` retains its previous status/evidence/timestamp;
+it cannot create a new completion. Explicit contradictory evidence can reset a
+done item. Malformed reviews stop the episode rather than fabricate progress.
+
+The main thread owns todo updates. Only changed item statuses abandon outstanding slow advice.
+A target switch additionally clears grasp/approach state, refreshes depth-based
+controller keypoints for that specific target, and verifies the marked grasp
+identity. A planner's identity assertion never substitutes for verification.
+`task_todo.json`, decision events and the final result retain todo progress.
+On official success, any remaining todo items are completed with explicit official-success evidence. Only official success ends the task successfully; visually done todos are not
+an official success signal.
 
 `reopen_and_retry` only opens in place. Subsequent alignment or relook is a
 separate choice. Standard intent definitions in `jev_observation.py` describe
@@ -102,3 +164,5 @@ Libraries must pass `validate.py` before a simulator is created. A recovery exce
 The monitor receives the initial plan, current todo/active goal, controller facts and episode lessons. Todo and active goal are detached with the asynchronous snapshot. A plan's `relook` step invokes visual perception; keypoints included in a planning reply trigger a visual refresh rather than replacing the perception base directly. Start-planning failures prevent entry into the Jev loop.
 
 The adapter rejects nonzero CLI exit codes even if stdout contains JSON. Missing requested images, malformed/nonfinite geometry, and invalid plan adjustments are errors. Planning calls and visual calls are counted separately; zero cost from the CLI adapter is an unmeasured placeholder.
+
+Todo review receives the canonical host todo separately from the decision view. Historical evidence survives unobserved outcomes, while previous verdicts and stage checkpoints are hidden from the classifier. Post-release regrasp questions share the same image request. Reviews run after each intent; only changed item statuses invalidate asynchronous planning.
