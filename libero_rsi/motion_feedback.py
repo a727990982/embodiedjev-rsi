@@ -34,6 +34,44 @@ def same_motion(old, target, orientation):
             and all(abs(a - b) <= 3 for a, b in zip(old['orientation_deg'], orientation)))
 
 
+def recovery_progress(intents, results, positions, grasp, contact_parts):
+    """Measure completed preparation/approach cycles, not individual motor success.
+
+    Compare all endpoints to the SAME visual waypoint so changing the estimate
+    alone is not progress. A real descent attempt starts a new validation cycle.
+    """
+    preparations = {'clear_reapproach', 'change_approach_yaw', 'back_off'}
+    history = list(zip(intents, results, positions, contact_parts))
+    tail = []
+    for row in reversed(history):
+        intent, result, _, _ = row
+        if intent not in preparations | {'move_above_object'}:
+            break
+        if result not in ('reached', 'at_target') and not result.startswith('recovery_prepared:'):
+            break
+        tail.append(row)
+    tail.reverse()
+    approaches = [i for i, row in enumerate(tail) if row[0] == 'move_above_object']
+    count = sum(row[0] in preparations for row in tail)
+    out = {'preparations_without_descent': count, 'no_progress': False,
+           'note': 'Preparation and reaching an approach waypoint do not verify clearance or graspability. '
+                   'Use current images to choose a descent test, a different approach, or diagnosis.'}
+    # Two completed preparation cycles between three approach endpoints.
+    if len(approaches) < 3 or tail[-1][0] != 'move_above_object':
+        return out
+    window = tail[approaches[-3]:]
+    if sum(row[0] in preparations for row in window) < 2:
+        return out
+    endpoints = [row for row in window if row[0] == 'move_above_object']
+    errors = [dist(row[2], grasp) for row in endpoints]
+    improvement = errors[0] - min(errors[1:])
+    cleared = bool(set(endpoints[0][3]) - set(endpoints[-1][3]))
+    out.update(no_progress=improvement < .006 and not cleared,
+               approach_error_m=errors, error_reduction_m=improvement,
+               contact_parts_cleared=cleared)
+    return out
+
+
 def contact_summary(pairs, robot_parts):
     """Report only the robot part in contact, never the other body's identity."""
     environment, self_contact = set(), set()

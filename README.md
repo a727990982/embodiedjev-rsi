@@ -99,6 +99,24 @@ against an old target after todo localization. See [runtime contract](libero_rsi
 
 ## Local dead-end → synchronous global relook
 
+Recovery preparation is not a successful retry. `clear_reapproach` raises the
+open hand, recenters and adjusts the visual grasp estimate, then queues
+`move_above_object`; it never descends. Its executor result is now
+`recovery_prepared:clear_reapproach:descent_unverified`. Jev still chooses whether
+the current view supports a descent test, another approach, or help.
+
+`motion_context.recovery_validation` reports the latest preparation position/commanded orientation
+and whether a descent has been tested since. Two preparation cycles between three
+approach endpoints trigger `recovery_no_progress` when they reduce distance to the
+same visual grasp estimate by less than 6 mm and clear no robot-part contact.
+Only approach endpoints are compared: the upward retreat itself is not progress.
+Real descent attempts reset the preparation cycle; task-target changes discard
+the previous target's history. This trigger can spend the same single reserved
+diagnosis used for motion stalls, even after ordinary help is exhausted, including
+when the diagnostic request fails. The latest failed-motion report and historical
+before image remain available to that diagnosis. This detects and escalates a
+preparation loop; it does not establish that the revised recovery succeeds in physics.
+
 Repeated local stall-family actions (`push_aside`, `clear_reapproach`, `raise_redescend`, lateral recenter) without a secured grasp, or hitting the push-aside caps, abort the local loop:
 
 1. Retreat for a clear front (agentview) look.

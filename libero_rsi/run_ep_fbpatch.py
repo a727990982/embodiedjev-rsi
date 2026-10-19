@@ -721,14 +721,16 @@ def _jev_input(*, include_execution_history=False):
     state, assets = JO.build_state(LANG, EP['task_todo'], proprio, frames, T[0], DONE[0])
     state['motion_context'] = _motion_context()
     state['startup_obstacle_advice'] = _startup_obstacle_advice()
-    if EP.get('motion_before_path') and EP.get('last_motion', {}).get('result') in ('stalled', 'timeout'):
+    failed_motion = EP.get('last_failed_motion') or EP.get('last_motion', {})
+    failed_image = EP.get('failed_motion_before_path') or EP.get('motion_before_path')
+    if failed_image and failed_motion.get('result') in ('stalled', 'timeout'):
         import base64, uuid
-        path = EP['motion_before_path']
+        path = failed_image
         ref = str(uuid.uuid4())
         with open(path, 'rb') as before_file:
             encoded = base64.b64encode(before_file.read()).decode()
         assets[ref] = {'type': 'image', 'format': 'png', 'data_base64': encoded}
-        state['motion_before_image'] = {'asset': ref, 'step': EP['last_motion']['start_step'],
+        state['motion_before_image'] = {'asset': ref, 'step': failed_motion['start_step'],
                                        'note': 'Historical front+wrist image before the failed motion.'}
     if include_execution_history:
         state['execution_history'] = JO.execution_history(EP['hist'], EP['result_hist'])
@@ -772,6 +774,11 @@ def _retarget_todo():
     _abandon_async_slow('todo_target_changed')
     old_id = EP.get('todo_target_id')
     EP['todo_target_id'] = new_id
+    EP['recovery_history_start'] = len(EP.get('hist', []))
+    EP['last_recovery_preparation'] = None
+    EP['last_failed_motion'] = None
+    EP['failed_motion_before_path'] = None
+    EP['motion_before_path'] = None
     EP.update(force_next_intent=None, grasp_confirm=False, grasp_secured_once=False,
               ever_contact=False, place_carry_reached_once=False, place_lower_stall_n=0,
               place_lift_lower_cycles=0, place_cycle_armed=False, place_force_release=False,
@@ -821,9 +828,25 @@ def _motion_orientation(shape=None):
             float(pick('tilt_deg', 'tilt', 0)), float(pick('tilt_dir_deg', 'tdir', 0))]
 
 
+def _recovery_context():
+    ns, _ = namespace()
+    start = EP.get('recovery_history_start', 0)
+    progress = MF.recovery_progress(
+        EP.get('hist', [])[start:], EP.get('result_hist', [])[start:],
+        EP.get('tcp_hist', [])[start:], ns['grasp'].tolist(),
+        EP.get('recovery_contact_hist', [])[start:])
+    preparation = EP.get('last_recovery_preparation')
+    if preparation:
+        progress['last_preparation'] = preparation
+        progress['descent_tested_since_preparation'] = EP.get('last_descent_step', -1) >= preparation['step']
+    return progress
+
+
 def _motion_context():
     ns, _ = namespace()
     return {'current_robot_contacts': robot_contacts(), 'last_motion': EP.get('last_motion'),
+            'last_failed_motion': EP.get('last_failed_motion'),
+            'recovery_validation': _recovery_context(),
             'close_position_check': MF.grasp_position(eef().tolist(), ns['grasp'].tolist(), ns['obj_w'], ns['obj_h']),
             'blocked_intents': list(EP.get('blocked_motions', {})),
             'slow_help_remaining': max(0, MAX_SLOW - P['slow']),
@@ -885,9 +908,11 @@ def servo(target, grip, gain=1.0, max_steps=60, tol=.006):
             start_step, T[0], result, before_contacts, during, robot_contacts())
         EP['motion_before_path'] = None
         if result in ('stalled', 'timeout'):
+            EP['last_failed_motion'] = EP['last_motion']
             path = os.path.join(ep_dir, f'motion_before_{start_step}_{T[0]}.png')
             Image.fromarray(before_image).save(path)
             EP['motion_before_path'] = path
+            EP['failed_motion_before_path'] = path
         log(t=T[0], motion_feedback=EP['last_motion'])
         return result
     pick = lambda pk, sk, d: next((v for v in (PATCH[pk], RSHAPE[sk], SHAPE[sk]) if v is not None), d)
@@ -1666,6 +1691,7 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
                 },
             }
     EP['stall_feedbacks'] = int(EP.get('stall_feedbacks', 0)) + 1
+    before_recovery = {'tcp_xyz_m': eef().tolist(), 'commanded_orientation_deg': _motion_orientation()}
     detail = {'action': action, 'reason': reason, 'stall_feedback_n': EP['stall_feedbacks']}
     l = bool(ns.get('left_contact')); r = bool(ns.get('right_contact')); both = bool(ns.get('contact'))
     grip = -1.0 if not EP['closed'] else 1.0
@@ -1758,6 +1784,12 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
 
     CUR.update(fb=f"STALLFB:{action}", fb_t=T[0])
     _note_patch_mutation(f'stall_feedback:{action}', detail)
+    if action in ('clear_reapproach', 'change_approach_yaw', 'raise_redescend', 'lateral_recenter'):
+        EP['last_recovery_preparation'] = {
+            'step': T[0], 'action': action, 'before': before_recovery,
+            'after': {'tcp_xyz_m': eef().tolist(), 'commanded_orientation_deg': _motion_orientation()},
+            'status': 'preparation_attempted_descent_unverified',
+        }
     try:
         _record_local_stall_family(action)
     except Exception:
@@ -1936,7 +1968,7 @@ def execute(name, ns):
         motion = EP.get('last_motion') or {}
         if motion.get('start_step', -1) >= before_step and motion.get('result') in ('stalled', 'timeout'):
             return motion['result']
-        return 'recovery:' + str(detail.get('action'))
+        return 'recovery_prepared:' + str(detail.get('action')) + ':descent_unverified'
     if name == 'close_gripper' and EP['closed']:
         if _transport_grasp_ready():
             return 'already_closed'
@@ -2438,7 +2470,7 @@ def _prepare_slow_snapshot(ctx, crit, phase, both, image_tag):
         lang=LANG, trigger=str(crit or phase), slow_ctx_json=ctx,
         experience_brief=brief, patch=PATCH,
         goal_id={'confirmed': goal_id_confirmed(), 'target': GOAL_TARGET},
-        ep_dir=ep_dir, keyframe_paths=[p for p in (EP.get('motion_before_path'), frame) if p])
+        ep_dir=ep_dir, keyframe_paths=[p for p in (EP.get('failed_motion_before_path') or EP.get('motion_before_path'), frame) if p])
     context['motion_images_note'] = 'First image, when two supplied, is before last failed motion; last image is current.'
     context['task_todo'] = json.loads(json.dumps(EP.get('task_todo')))
     context['active_goal'] = TODO.active_item(context['task_todo']) if context['task_todo'] else None
@@ -2629,7 +2661,7 @@ def _sync_slow(intent, result, crit):
         else:
             _abandon_async_slow(reason=f'sync:{crit}')
     _drain_orphan_slow_costs()
-    reserved = (crit == 'motion_obstruction' and MAX_SLOW > 0 and
+    reserved = (crit in ('motion_obstruction', 'recovery_no_progress') and MAX_SLOW > 0 and
                 P['slow'] >= MAX_SLOW and not EP.get('motion_help_used'))
     if P['slow'] >= MAX_SLOW and not reserved: return 'slow_cap', None
     if reserved:
@@ -2691,6 +2723,9 @@ def _hard_astra_trigger(intent, result):
     """Critical physical stalls retain one bounded diagnosis after general help is exhausted."""
     if not FALLBACK:
         return None
+    if _recovery_context()['no_progress'] and MAX_SLOW > 0:
+        if P['slow'] < MAX_SLOW or not EP.get('motion_help_used'):
+            return 'recovery_no_progress'
     if result in ('stalled', 'timeout') and MAX_SLOW > 0:
         if P['slow'] < MAX_SLOW or not EP.get('motion_help_used'):
             return 'motion_obstruction'
@@ -3021,6 +3056,11 @@ try:
         EP['n_same'] = EP['n_same'] + 1 if it == EP['prev'] else 1; EP['prev'] = it; EP['step'] += 1
         EP['hist'].append(it); EP['tcp_hist'].append(eef())
         EP['result_hist'].append(r); EP['grip_hist'].append(bool(EP['closed']))
+        contact_state = robot_contacts()
+        EP.setdefault('recovery_contact_hist', []).append(
+            contact_state['environment_contact_parts'] + contact_state['self_contact_parts'])
+        if it == 'descend_to_grasp' and r in ('reached', 'at_target', 'stalled', 'timeout'):
+            EP['last_descent_step'] = T[0]
         # Place-phase thrash tracking → maybe queue force open_gripper for next decision
         try:
             _note_place_phase(it, r)
