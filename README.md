@@ -253,3 +253,19 @@ limits, no-progress diagnosis and grasp/release guards remain active, so this is
 control of routine automatic rules, not an unguarded or exclusively Jev policy.
 `motion_context.recovery_control` and `result.json.recovery_control` record the mode.
 This PR adds no duplicate action library, outcome format or alternate observation path.
+
+## Current-state execution descriptions
+
+The acting criteria for `clear_reapproach`, `move_above_object`,
+`descend_to_grasp` and `change_approach_yaw` include a description built from the
+same decision-step namespace. It separates `program_steps`, `conditional_effects`
+and `unverified_physics`. Move targets come from the loaded library expressions;
+recovery offsets/yaw use calculations shared with execution. Commanded targets
+are derived from visual estimates, never object ground truth or physics lookahead.
+Descriptions include current repetition evidence, the existing forced approach
+follow-up, and any pre-existing local-deadend interception. Requested displacement,
+rotation and clearance are not promises of achieved motion or a successful grasp.
+The candidate set/order, action guards and Jev's selection remain unchanged.
+The exact descriptions and criteria are logged before the acting request. Other
+candidates retain their existing definitions; there are no extra model calls or
+simulation steps to produce these descriptions.

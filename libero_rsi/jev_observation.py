@@ -33,6 +33,9 @@ INSTRUCTIONS = (
     'acquire a new grasp by repeating close. Recover from empty, slipped or wrong-object grasps. '
     'The active todo identifies the requested object; do not confuse another task object with it. '
     'Only official_success proves the whole task has succeeded.'
+    ' Candidate execution descriptions separate definite program operations from conditional '
+    'effects and unverified physics. Commanded targets are visual-estimate controller goals, '
+    'not observed future states. Evaluate the alternatives yourself; no candidate is prescribed.'
 )
 
 # Match actual executor behavior; do not name predicates from cached perception.
@@ -77,9 +80,14 @@ def build_state(language_goal, todo, proprioception, frames, step, official_succ
     return state, assets
 
 
-def candidate_definitions(intents):
+def candidate_definitions(intents, execution=None):
     # Unknown/custom intent definitions remain supplied by their own library.
-    return {name: APPLICABILITY.get(name, value['definition']) for name, value in intents.items()}
+    definitions = {name: APPLICABILITY.get(name, value['definition']) for name, value in intents.items()}
+    for name, description in (execution or {}).items():
+        if name in definitions:
+            definitions[name] += '\nCurrent execution description: ' + json.dumps(
+                description, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+    return definitions
 
 
 def execution_history(intents, results):
