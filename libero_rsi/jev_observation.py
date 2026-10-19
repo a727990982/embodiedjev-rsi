@@ -64,3 +64,29 @@ def build_state(language_goal, todo, proprioception, frames, step, official_succ
 def candidate_definitions(intents):
     # Unknown/custom intent definitions remain supplied by their own library.
     return {name: APPLICABILITY.get(name, value['definition']) for name, value in intents.items()}
+
+
+def execution_history(intents, results):
+    """Describe completed actions without inferring present scene state."""
+    if len(intents) != len(results):
+        raise ValueError('Each completed intent needs its execution result')
+    same_intent = same_pair = 0
+    if intents:
+        for intent in reversed(intents):
+            if intent != intents[-1]:
+                break
+            same_intent += 1
+        for intent, result in zip(reversed(intents), reversed(results)):
+            if (intent, result) != (intents[-1], results[-1]):
+                break
+            same_pair += 1
+    return {
+        'recent_actions': [{'intent': intent, 'result': result}
+                           for intent, result in zip(intents[-8:], results[-8:])],
+        'last_intent': intents[-1] if intents else None,
+        'consecutive_same_intent': same_intent,
+        'consecutive_same_intent_and_result': same_pair,
+        'note': ('Past completed actions and executor return values, not claims about '
+                 'the current scene or task success. Counts include the latest completed '
+                 'action. Current images and proprioception describe the present state.'),
+    }

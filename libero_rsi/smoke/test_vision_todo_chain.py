@@ -95,6 +95,41 @@ class TodoTests(unittest.TestCase):
 
 
 class VisionTests(unittest.TestCase):
+    def test_history_keeps_full_streak_with_bounded_recent_window(self):
+        intents = ['close_gripper'] + ['lift'] * 63
+        results = ['closed'] + ['at_target'] * 63
+        history = JO.execution_history(intents, results)
+        self.assertEqual(len(history['recent_actions']), 8)
+        self.assertEqual(history['consecutive_same_intent'], 63)
+        self.assertEqual(history['consecutive_same_intent_and_result'], 63)
+        results[-1] = 'stalled'
+        self.assertEqual(history['recent_actions'][-1]['result'], 'at_target')
+        changed = JO.execution_history(intents, results)
+        self.assertEqual(changed['consecutive_same_intent'], 63)
+        self.assertEqual(changed['consecutive_same_intent_and_result'], 1)
+
+    def test_history_requires_paired_completed_actions(self):
+        self.assertEqual(JO.execution_history([], [])['consecutive_same_intent'], 0)
+        with self.assertRaises(ValueError):
+            JO.execution_history(['lift'], [])
+
+    def test_acting_history_is_logged_and_does_not_mutate_old_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            ep = {'task_todo':todo(), 'vision_serial':0,
+                  'hist':['lift','lift'], 'result_hist':['reached','at_target']}
+            logged = []
+            scope = functions('_jev_input', JO=JO, EP=ep, LANG='goal', T=[706],
+                DONE=[False], Image=Image, ep_dir=temp, log=lambda **kw:logged.append(kw),
+                _current_observation=lambda:(proprio(),{'front':np.zeros((2,2,3),dtype='uint8')}))
+            state, _ = scope['_jev_input'](include_execution_history=True)
+            self.assertEqual(state['execution_history']['recent_actions'][-1],
+                             {'intent':'lift','result':'at_target'})
+            self.assertEqual(logged[-1]['state'], state)
+            ep['hist'].append('carry_to_place'); ep['result_hist'].append('reached')
+            self.assertEqual(state['execution_history']['last_intent'], 'lift')
+            spectator_base, _ = scope['_jev_input']()
+            self.assertNotIn('execution_history', spectator_base)
+
     def test_same_frame_pixels_complete_proprio_and_no_cached_facts(self):
         measured = {**proprio(), 'astra_says_object_held': True, 'at_grasp': True,
                     'place_point_estimate_m': [9, 9, 9]}
