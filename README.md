@@ -7,6 +7,7 @@ Public snapshot of the LIBERO RSI / EmbodiedJev harness. This repo had no prior 
 | `libero_rsi/coding_agent_slow.py` | Codex CLI transport for start planning, slow-think, Astra perception and identity checks. |
 | `libero_rsi/run_ep_fbpatch.py` | Episode harness: Jev intents, stall feedback, grasp confirm, local-deadend relook, place force-release. Needs LIBERO, MuJoCo, Codex CLI, and the Jev client to actually roll out. |
 | `libero_rsi/jev_experience.py` | Builds library advice for Astra/Codex planning; cached predicates are not Jev input. |
+| `libero_rsi/jev_todo.py` | Jev completion questions, classification records, and atomic progress updates. |
 | `libero_rsi/task_todo.py` | Task objectives, evidence-backed progress, and active object selection. |
 | `libero_rsi/jev_observation.py` | Same-frame camera/proprioception input and applicable intent definitions. |
 | `libero_rsi/jev_choice.py` | Bundled TypeSafe Jev 1.14 image-capable HTTP client. |
@@ -36,14 +37,29 @@ should reopen; `reopen_and_retry` opens **at the current pose**, leaving alignme
 or relook to the next decision. Repeating `close_gripper` while already closed
 does not move. Spectator Jev uses the same current-image input boundary.
 
-Astra reviews todo progress after release, relook, retreat, help requests,
-stall/timeout or empty-grasp reports, before the next decision. During execution, only current-image
-evidence can mark an outcome done; official full-task success completes the
-remaining todo items with an explicit official-success record. Occlusion preserves an older verified outcome
-with its original timestamp; visible contradictory evidence can reopen it.
-Changing the active item cancels pending slow advice, clears old grasp/approach
-state and re-localizes and verifies the new target. Uncertain identity still
-blocks closing. `finish` cannot end the task before official success.
+After each executed intent, Jev checks every todo item from fresh, same-frame
+images and proprioception before the next decision. Astra writes concrete
+completion conditions at startup, for example: **Is the butter inside the
+basket and no longer held by the gripper?** Jev chooses `done`, `pending`,
+`uncertain` (visible but ambiguous), or `unobserved` (cannot inspect the required
+object/region). A release command, an object hovering above the basket, or a
+wrong object in the basket is not completion. Prior verdicts are omitted from
+the review request to avoid copying an earlier tick.
+
+One multi-question Jev request checks all items; the main thread validates the
+complete reply, updates the todo, and switches/relocalizes the target before
+asking Jev for its next action. These are **separate synchronous calls**, so
+next-action selection sees the updated target. Unobserved items preserve earlier
+status and its original evidence timestamp; visible contradictory evidence can
+reopen a completed item. At a budget limit, the final non-successful scene is
+reviewed without initiating another target-directed motion. Official success
+completes remaining items directly and is still required to finish successfully.
+
+Status changes invalidate outstanding slow advice; unchanged reviews do not.
+Target changes also clear old grasp/approach state and trigger Astra localization
+and identity verification. Astra/Codex retains startup planning, perception and
+recovery help; routine todo checks use Jev. Logs retain review questions,
+classifications, probabilities and references to the exact current frames.
 
 Controller coordinates and DSL predicates remain internal to control/recovery;
 removing them would make motion execution impossible. Library recovery rules
@@ -71,16 +87,17 @@ During place, consecutive `lower_to_place` stalls (`MAX_PLACE_LOWER_STALL`, defa
 
 | Role | Model | Invocation |
 |---|---|---|
-| Episode-start plan/todo and visual todo review | Astra (`gpt-6-astra`) | Codex CLI |
+| Episode-start plan/todo | Astra (`gpt-6-astra`) | Codex CLI |
 | Sync/async slow-think | `CODING_AGENT_CODEX_MODEL` (default `gpt-6-astra`) | Codex CLI |
 | Visual perception, keypoints and identity verification | Astra (`gpt-6-astra`) | Codex CLI |
+| Todo completion review | TypeSafe `jev-1.14.0` | `jev_todo.review` → `jev_choice.choose_questions` |
 | Per-step intent selection and spectator decision | TypeSafe `jev-1.14.0` | Bundled `jev_choice.choose`, with image assets |
 
 Codex is the invocation mechanism; Astra is the visual model. Perception and marked-grasp identity verification both use `codex exec -m gpt-6-astra`. There is no dual/comparison mode or direct Astra-client transport. The former `CODING_AGENT_SLOW`, `EPISODE_START_PLAN`, and `CODING_AGENT_PERCEIVE` role switches are no longer read. The mock backend is removed from all helpers; unsupported backend values are rejected.
 
 Early recovery refreshes perception with Astra through Codex CLI, then requests Codex planning. CLI failures do not switch to a direct Astra client or to mock results. The existing `ask_astra`, `consult_astra`, and `defer_to_astra` intent labels are retained for the shipped libraries and logs, but their help path invokes Codex planning.
 
-Codex looks up `codex` on `PATH`, or `CODING_AGENT_CODEX_BIN`. Slow-think uses `CODING_AGENT_CODEX_MODEL` and `CODING_AGENT_CODEX_EFFORT`; start/todo calls pin Astra and use `CODING_AGENT_CODEX_EFFORT`. Perception/identity uses `gpt-6-astra` with `ASTRA_EFFORT` (default `xhigh`). A proxy is used only when `CODING_AGENT_HTTP_PROXY` or `CODING_AGENT_SOCKS` is set. Do not commit proxy URLs, keys, or host details.
+Codex looks up `codex` on `PATH`, or `CODING_AGENT_CODEX_BIN`. Slow-think uses `CODING_AGENT_CODEX_MODEL` and `CODING_AGENT_CODEX_EFFORT`; start-plan/todo-generation calls pin Astra and use `CODING_AGENT_CODEX_EFFORT`. Perception/identity uses `gpt-6-astra` with `ASTRA_EFFORT` (default `xhigh`). A proxy is used only when `CODING_AGENT_HTTP_PROXY` or `CODING_AGENT_SOCKS` is set. Do not commit proxy URLs, keys, or host details.
 
 Async slow-think captures a detached copy of policy state and a unique image before starting its worker. Workers return results and log events in private job boxes; the main thread writes the decision log. Simulator diagnostic files are never passed to the coding monitor, including when `DIAG` is enabled. Async advice is discarded after target revision, gripper state, close-attempt count, or identity confirmation changes. At shutdown pending calls are joined and logged without applying their plans.
 
@@ -90,7 +107,7 @@ The bundled Jev client requires `TYPESAFE_API_KEY` in the process environment.
 It pins `jev-1.14.0` and sends images using TypeSafe assets and the image opt-in
 header. It does not load a similarly named external client or silently use a
 text-only model. The [TypeSafe image protocol](https://docs.typesafe.ai/images)
-is used for both acting and spectator decisions.
+is used for acting, spectator decisions and todo reviews.
 
 Real rollouts also require an authenticated Codex CLI, LIBERO with its assets,
 MuJoCo/robosuite, SciPy, NumPy, Pillow and rendering dependencies. `astra_client`
@@ -125,4 +142,4 @@ The regression suite executes selected production functions with environment/mod
 
 See [the earlier call-chain audit](libero_rsi/reviews/call_chain_audit.md) for verified wiring, fixed regressions, and remaining environment requirements. `test_runtime_chain.py` executes the top-level runner with fake services; it does not test LIBERO physics or robot success.
 
-`astra_calls` counts perception/identity and todo-review replies; `todo_review_calls` is also reported separately; `planning_calls` counts start/slow-planning replies. Codex CLI does not provide measured usage in this adapter, so its zero-valued cost fields are placeholders, not evidence of free calls.
+`astra_calls` counts perception/identity replies; `planning_calls` counts start/slow-planning replies. `jev_calls` counts acting decisions, `gate_jev_calls` counts spectator decisions, and `todo_review_calls` counts separate Jev progress-review requests; `todo_review_model` records their model. Sum these three Jev counters for successful Jev requests. A review requests one Choice answer per todo item, not one HTTP request per item. Codex CLI does not provide measured usage in this adapter, so its zero-valued cost fields are placeholders, not evidence of free calls.

@@ -672,6 +672,7 @@ Reply ONLY one JSON object (no markdown fences):
 }}
 
 Rules:
+- Write each completion_condition as a concrete, currently observable yes/no question for Jev. Name the exact target, destination and required relation. For placement, require the target inside its destination and released: "Is the butter inside the basket and no longer held by the gripper?" Held above the basket, outside it, or a different object inside does not satisfy that condition. Avoid vague criteria such as "task done" or "action executed".
 - task_todo MUST cover EVERY requested object/outcome in the language goal, with one ordered item per final object outcome. Keep each object's grasp/transport/release within its item, not separate completed motor steps. Do not report completion in this initial plan. A planned close is not a grasp; a planned release is not successful placement.
 - READ experience_brief.recoveries and experience_brief.lessons first. For each applicable when→prefer / when→instead, bake it into phase_order (and diagnosis). Use GENERAL triggers only — no object-brand hardcodes in lesson text.
 - After EVERY place, include retreat (lift clear of container / leave rim) BEFORE the next approach. This is predictive clearance so the arm does not tip or scrape the place region — not something for mid-episode hard gates to invent later.
@@ -925,29 +926,3 @@ def harness_call_start_plan(
         keyframe_paths=paths,
     )
     return call_start_plan(ctx, mode=mode)
-
-
-def call_todo_review(*, todo, proprioception, image_paths, step, reason):
-    """Astra reviews outcomes from current images; never consumes simulator truth."""
-    if not image_paths:
-        raise ValueError('todo review requires current images')
-    prompt = '''You are Astra reviewing TASK TODO progress for a robot.
-Use ONLY the attached CURRENT images and current proprioception to assess each
-item's completion_condition. Todo status/evidence are historical, not current
-facts. Actions and close/open commands do not prove completion. A grasped object
-is not yet placed. If an object/region is occluded or absent from the images,
-use unobserved; do not assume success or erase earlier verified placement solely
-because of occlusion. When visible evidence contradicts prior completion, use
-pending, or uncertain if visible but ambiguous. Do not add goals, change target
-identity or invent coordinates.
-Reply ONLY JSON: {"items":[{"id":"existing id", "status":"pending|done|uncertain|unobserved",
-"evidence":"brief current-image observation or reason for uncertainty"}]}.
-Include every existing id exactly once. Full task success is checked separately
-by the official environment; an all-done todo is only visual progress.
-Current context:
-'''
-    prompt += json.dumps({'task_todo': todo, 'proprioception': proprioception,
-                          'observation_step': step, 'review_reason': reason}, ensure_ascii=False)
-    raw, rec = call_codex(prompt, image_paths, model=PERCEPTION_MODEL)
-    import task_todo
-    return task_todo.apply_review(todo, raw, step), rec

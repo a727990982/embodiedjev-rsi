@@ -34,8 +34,8 @@ APPLICABILITY = {
     'open_gripper': 'Use when the correctly held active target has reached its destination and is ready for release. Open at the current pose. If holding the wrong object or empty, use reopen_and_retry.',
     'retreat': 'Use after release to raise the empty, open gripper clear of the destination and reveal the placed object for review.',
     'relook': 'Use when current images do not reliably locate the active target or its grasp alignment. Pause target-directed motion and refresh Astra visual localization.',
-    'ask_astra': 'Ask Codex slow-think and Astra todo review for help when stuck, the active goal is unclear, or current images contradict todo progress.',
-    'consult_astra': 'Alias of ask_astra: request slow-think and a current-image todo review.',
+    'ask_astra': 'Ask Codex/Astra for localization or recovery help when stuck or the active target is unclear. Jev handles routine todo completion checks.',
+    'consult_astra': 'Alias of ask_astra: request localization or recovery help.',
     'finish': 'Use only when official_success is true; placement progress or an all-done todo alone is insufficient.',
 }
 

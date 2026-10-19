@@ -23,11 +23,11 @@ request logs. This API returns choice probabilities, not raw model logits.
 | `jev_choice.choose(state, instructions, criteria, assets=..., meta=...)` | Returns `(choice, probabilities, latency)`; requires current image assets and rejects a wrong model or invalid candidate/probability reply. |
 
 No external `jev_choice` or `astra_client` is loaded. Astra via Codex CLI writes
-the episode-start todo and provides perception, identity verification and todo
-progress review. Codex CLI also runs sync/async slow-think; Jev chooses per-step
+the episode-start todo and provides perception and identity verification. Jev
+reviews todo completion from current observations. Codex CLI also runs sync/async slow-think; Jev chooses per-step
 intents. There is no dual mode, mock backend or text-only image fallback.
 
-Codex requires its CLI and configured authentication. Configure the slow-think model and planning effort with `CODING_AGENT_CODEX_MODEL` and `CODING_AGENT_CODEX_EFFORT`, and the executable with `CODING_AGENT_CODEX_BIN`. Perception and marked-grasp identity verification explicitly use `gpt-6-astra` with `ASTRA_EFFORT` (default `xhigh`), independently of the slow-think model override. Start planning/todo and todo reviews also pin Astra; they use the planning effort. There is no mock backend. Offline tests inject fixed replies at the CLI boundary; they do not demonstrate visual capability.
+Codex requires its CLI and configured authentication. Configure the slow-think model and planning effort with `CODING_AGENT_CODEX_MODEL` and `CODING_AGENT_CODEX_EFFORT`, and the executable with `CODING_AGENT_CODEX_BIN`. Perception and marked-grasp identity verification explicitly use `gpt-6-astra` with `ASTRA_EFFORT` (default `xhigh`), independently of the slow-think model override. Start planning/todo generation also pins Astra and uses the planning effort. Routine todo reviews use TypeSafe Jev 1.14, independently of Codex settings. There is no mock backend. Offline tests inject fixed replies at the CLI boundary; they do not demonstrate visual capability.
 
 For early recovery the harness abandons pending advice, refreshes keypoints/identity using Astra through Codex CLI, and calls synchronous Codex planning. A perception failure stops that recovery attempt; a Codex failure is recorded without invoking a separate client or substituting a mock result. Existing help-intent labels (`ask_astra`, `consult_astra`, `defer_to_astra`) keep their names in libraries/logs but route to Codex planning.
 
@@ -50,20 +50,40 @@ The start planner must return `task_todo.items`, each with unique `id`, `target`
 claim of completion. Each item describes an object's desired final outcome,
 not a fixed sequence of motor commands. The first non-done item is active.
 
-After release, relook, retreat, help, failure, or a premature finish request,
-Astra reviews every item using a new same-frame image/sensor snapshot. A complete
-review returns each id with `pending`, `done`, `uncertain` or `unobserved` and an
-evidence explanation. `unobserved` retains its previous status/evidence/timestamp;
-it cannot create a new completion. Explicit contradictory evidence can reset a
-done item. Malformed reviews stop the episode rather than fabricate progress.
+After each executed intent, `jev_todo.review` receives the same current camera
+and proprioception boundary as acting Jev. It sends one Choice question per todo
+item in a single TypeSafe request, naming the exact target, desired outcome and
+completion condition. Prior status/evidence are omitted from this classifier
+input. All required conditions must hold: for placement, the requested object
+must be inside its destination and released, not merely held above it or named
+by an executed command.
 
-The main thread owns todo updates. Each review abandons outstanding slow advice.
-A target switch additionally clears grasp/approach state, refreshes depth-based
-controller keypoints for that specific target, and verifies the marked grasp
-identity. A planner's identity assertion never substitutes for verification.
-`task_todo.json`, decision events and the final result retain todo progress.
-On official success, any remaining todo items are completed with explicit official-success evidence. Only official success ends the task successfully; visually done todos are not
-an official success signal.
+The response for each item is `done`, `pending`, `uncertain` (visible but
+ambiguous) or `unobserved` (required region/target cannot be inspected). A review
+validates the entire question set, candidate set and probability values before
+any progress is committed. `unobserved` preserves the prior status, evidence and
+timestamp. Visible contradictions reopen done items. Choice responses have no
+free-text rationale: the evidence field explicitly records a Jev classification,
+and the decision log stores the questions, probabilities, item-id mapping,
+observation step and frame references instead of fabricating an explanation.
+
+The main thread performs this review synchronously before selecting the next
+intent. After committing progress, it retargets and relocalizes with Astra when
+the active object changes; only then does the separate Jev action request run.
+At the decision/horizon cap, a final non-successful scene is reviewed after
+settling, without retargeting or further motion. Official success skips that
+review and completes the remaining items with official-success evidence.
+
+A changed status invalidates outstanding slow advice; an unchanged classification
+does not discard it merely because the evidence timestamp was refreshed. Target
+switches clear old grasp/approach state and require Astra identity verification.
+`task_todo.json`, decision events and the final result retain progress. All-done
+visual todos never substitute for official full-task success.
+
+`choose_questions(state, questions, assets=...)` returns validated answers and
+latency. `choose(...)` retains its existing single-action tuple contract.
+`todo_review_calls` counts Jev review requests separately from acting `jev_calls`
+and spectator `gate_jev_calls`; it is not included in `astra_calls`.
 
 `reopen_and_retry` only opens in place. Subsequent alignment or relook is a
 separate choice. Standard intent definitions in `jev_observation.py` describe

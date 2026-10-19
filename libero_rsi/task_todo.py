@@ -63,8 +63,9 @@ def decision_view(todo):
     result['note'] = (
         'Goals describe desired outcomes. Status/evidence are observations at checked_at_step, '
         'not assertions about the current image. Current images and proprioception take priority. '
-        'Do not count a command as completion. If a completed goal is contradicted, ask Astra '
-        'to review it. Empty, slipped or wrong-object grasps require recovery within the active goal. '
+        'Do not count a command as completion. Jev reviews completion from fresh observations '
+        'after actions; the host updates progress before the next decision. '
+        'Empty, slipped or wrong-object grasps require recovery within the active goal. '
         'Only official_success establishes full task success.'
     )
     return result

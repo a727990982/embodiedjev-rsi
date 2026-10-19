@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 import coding_agent_slow as CAS
 import jev_choice as JC
 import jev_observation as JO
+import jev_todo as JT
 import task_todo as TODO
 from test_review_regressions import functions
 
@@ -82,16 +83,8 @@ class TodoTests(unittest.TestCase):
                 TODO.apply_review(t, {'items': rows}, 1)
         self.assertEqual(t['revision'], 0)
 
-    def test_review_uses_astra_even_if_slow_model_is_overridden(self):
-        raw = {'items': [{'id': n, 'status': 'pending', 'evidence': 'still on table'}
-                         for n in ('cheese', 'butter')]}
-        with patch.object(CAS, 'CODEX_MODEL', 'different-slow-model'), \
-                patch.object(CAS, 'call_codex', return_value=(raw, {})) as call:
-            updated, _ = CAS.call_todo_review(todo=todo(), proprioception=proprio(),
-                image_paths=['current.png'], step=12, reason='released')
-        self.assertEqual(call.call_args.kwargs['model'], 'gpt-6-astra')
-        self.assertEqual(call.call_args.args[1], ['current.png'])
-        self.assertEqual(updated['revision'], 1)
+    def test_planner_requests_observable_target_specific_conditions(self):
+        self.assertIn('Is the butter inside the basket and no longer held', CAS.START_PLAN_PROMPT)
 
 
 class VisionTests(unittest.TestCase):

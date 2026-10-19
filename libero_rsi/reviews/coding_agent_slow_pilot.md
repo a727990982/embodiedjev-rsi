@@ -3,8 +3,8 @@
 The current harness uses one production assignment:
 
 - Codex CLI: invocation transport and synchronous/asynchronous slow-think.
-- Astra via Codex CLI: start planning/todo, visual perception, RGB-D keypoints, identity verification and todo progress review.
-- TypeSafe Jev 1.14: image/todo/proprioception action selection and spectator decisions.
+- Astra via Codex CLI: start planning/todo, visual perception, RGB-D keypoints, identity verification.
+- TypeSafe Jev 1.14: current-image todo completion review, action selection and spectator decisions.
 
 `coding_agent_slow.py` contains the planning/perception schemas and shared Codex CLI transport. Visual perception and marked-grasp verification explicitly select `gpt-6-astra`; the slow-think model can be configured separately. Start/todo calls also pin Astra. Mock backends are removed; offline tests use literal replies and fake CLI processes. The runner does not read environment variables to change model roles, and it does not compare two planners or fall back to a direct Astra client when Codex fails.
 
