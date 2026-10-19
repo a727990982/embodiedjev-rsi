@@ -8,6 +8,7 @@ Public snapshot of the LIBERO RSI / EmbodiedJev harness. This repo had no prior 
 | `libero_rsi/run_ep_fbpatch.py` | Command-line entry point for one episode. Needs LIBERO, MuJoCo, Codex CLI, and the Jev client to actually roll out. |
 | `libero_rsi/harness/` | Episode harness package: Jev intents, stall feedback, grasp confirm, local-deadend relook, place force-release. The module map is in `harness/__init__.py`; it can be imported without the simulator. |
 | `libero_rsi/jev_experience.py` | Builds library advice for Astra/Codex planning; cached predicates are not Jev input. |
+| `libero_rsi/grasp_experience.py` | Curated conditional grasp advice for acting Jev, matched from its existing observations. |
 | `libero_rsi/jev_todo.py` | Jev completion questions, classification records, and atomic progress updates. |
 | `libero_rsi/task_todo.py` | Task objectives, evidence-backed progress, and active object selection. |
 | `libero_rsi/jev_observation.py` | Same-frame camera/proprioception input and applicable intent definitions. |
@@ -52,6 +53,28 @@ movement and remaining error, plus a visual-waypoint proximity check. Failed
 motion before-images and startup obstacle advice are explicitly historical.
 Commanded waypoints are estimates, never simulator object truth or a certificate
 of a collision-free path. Cached `seen_held` and library predicates are not sent.
+
+Acting Jev also receives `grasp_experience`: up to three short entries with an
+applicable condition, interpretation, options to consider, outcome checks and
+source references. The ten curated entries cover identity uncertainty, failed
+capture, refused execution, untested recovery preparation, stalled motion,
+alignment, capture verification, supported transport, release and placement
+review. All are labeled `curated_hypothesis`; references to past failures do not
+establish that the proposed recovery works. The selector uses current task
+checkpoints, proprioception, motion context and completed actions since the
+current target was selected. It does not infer obstruction from an old failure
+image or startup prediction, and emits no matches for stale checkpoints or a
+completed task. Supported holds and pending placement reviews take priority over
+old grasp failures.
+
+This advice is attached to the existing acting request and recorded verbatim in
+`decisions.jsonl`. It does not change candidates, ordering, guards or forced
+recovery rules, and makes no extra model call or simulator step. Jev evaluates
+the advice against current images and selects the action. Spectator and todo
+review requests do not receive this action advice. Astra/Codex retains its
+existing library brief; no episode reflection is automatically promoted into
+this curated catalog. Offline fixtures and fake execution chains verify these
+boundaries, not improved model decisions or physical task success.
 
 Acting Jev additionally receives the last eight completed intent/result pairs,
 plus the consecutive count of the same intent and the same intent/result pair.

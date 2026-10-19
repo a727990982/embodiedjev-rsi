@@ -21,7 +21,8 @@ sys.path.insert(0, str(ROOT))
 import coding_agent_slow as CAS
 
 
-def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fault=False, close_fault=False):
+def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fault=False, close_fault=False,
+             advice_disabled=False):
     events = []
     def module(name, **attrs):
         obj = types.ModuleType(name)
@@ -90,6 +91,12 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
         assert stage_progress['next_stage'] == 'secure_grasp'
         assert not stage_progress['current_grasp_confirmed']
         assert 'observed_facts' not in state and 'experience_brief' not in state
+        if not advice_disabled:
+            advice = state['grasp_experience']
+            assert advice['target_id'] == state['task_todo']['active_id']
+            assert advice['observation_step'] == state['observation_step']
+            assert 1 <= len(advice['lessons']) <= 3
+            assert all(x['status'] == 'curated_hypothesis' for x in advice['lessons'])
         assert not {'lift', 'carry_to_place', 'lower_to_place'} & set(criteria), 'Empty hand must not be offered transport'
         history = state['execution_history']
         completed = [event.split(':', 1)[1] for event in events if event.startswith('jev:') and event != 'jev:todo_review']
@@ -158,9 +165,12 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
         from harness import grasping
     place_patch = (patch.object(grasping, '_note_place_phase', side_effect=KeyError('injected place-phase failure'))
                    if place_fault else contextlib.nullcontext())
+    import jev_observation as JO
+    advice_patch = (patch.object(JO, 'grasp_experience', return_value={})
+                    if advice_disabled else contextlib.nullcontext())
     with patch.dict(os.environ, env, clear=True), patch.object(CAS, 'call_codex', side_effect=codex), \
          patch.object(sys, 'argv', ['run_ep_fbpatch.py','fake_suite','0','0',str(library),destination]), \
-         patch.object(os, '_exit', side_effect=exit_process), place_patch:
+         patch.object(os, '_exit', side_effect=exit_process), place_patch, advice_patch:
         try:
             runpy.run_path(str(ROOT/'run_ep_fbpatch.py'), run_name='__main__')
         except SystemExit as ex:
@@ -171,7 +181,8 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
 
 
 class RuntimeChainTests(unittest.TestCase):
-    def run_scenario(self, fail_start, handoff=False, menus=False, place_fault=False, close_fault=False):
+    def run_scenario(self, fail_start, handoff=False, menus=False, place_fault=False, close_fault=False,
+                     advice_disabled=False):
         with tempfile.TemporaryDirectory() as temp:
             args = [sys.executable, __file__, '--fake-run', temp]
             if menus: args.append('--menus')
@@ -179,6 +190,7 @@ class RuntimeChainTests(unittest.TestCase):
             if handoff: args.append('--handoff')
             if place_fault: args.append('--place-fault')
             if close_fault: args.append('--close-fault')
+            if advice_disabled: args.append('--advice-disabled')
             run = subprocess.run(args, capture_output=True, text=True, timeout=20)
             result_path = Path(temp)/'fake_suite_t0_i0'/'result.json'
             self.assertTrue(result_path.exists(), run.stdout + run.stderr)
@@ -233,6 +245,21 @@ class RuntimeChainTests(unittest.TestCase):
         self.assertEqual(result['pose_menu_counts']['rotate'],1)
         self.assertIn('jev:todo_review',events)
 
+    def test_advice_preserves_fake_jev_choices_and_target_handoff(self):
+        # Same scripted choices with/without advice prove wiring invariance, not model performance.
+        on, result_on, events_on = self.run_scenario(False, handoff=True)
+        on_targets = list(self.active_targets)
+        on_log = [d for d in self.decisions if d.get('jev_observation')]
+        self.assertTrue(any(d['state'].get('grasp_experience', {}).get('lessons') for d in on_log))
+        off, result_off, events_off = self.run_scenario(False, handoff=True, advice_disabled=True)
+        self.assertEqual(on.returncode, 0, on.stderr)
+        self.assertEqual(off.returncode, 0, off.stderr)
+        self.assertEqual(events_on, events_off)
+        self.assertEqual(on_targets, self.active_targets)
+        for key in ('success', 'end_reason', 'env_steps', 'decisions', 'jev_calls', 'astra_calls',
+                    'planning_calls', 'todo_review_calls', 'task_todo'):
+            self.assertEqual(result_on[key], result_off[key], key)
+
     def test_start_plan_failure_does_not_enter_jev_loop(self):
         run, result, events = self.run_scenario(True)
         self.assertEqual(run.returncode, 1)
@@ -270,5 +297,6 @@ class RuntimeChainTests(unittest.TestCase):
 if __name__ == '__main__':
     if '--fake-run' in sys.argv:
         raise SystemExit(fake_run(sys.argv[2], '--fail-start' in sys.argv, '--handoff' in sys.argv, '--menus' in sys.argv,
-                                  '--place-fault' in sys.argv, '--close-fault' in sys.argv))
+                                  '--place-fault' in sys.argv, '--close-fault' in sys.argv,
+                                  '--advice-disabled' in sys.argv))
     unittest.main()

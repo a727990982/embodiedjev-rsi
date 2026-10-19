@@ -93,6 +93,9 @@ def _jev_input(*, include_execution_history=False):
                                        'note': 'Historical front+wrist image before the failed motion.'}
     if include_execution_history:
         state['execution_history'] = JO.execution_history(EP['hist'], EP['result_hist'])
+        start = EP.get('recovery_history_start', 0)
+        target_history = JO.execution_history(EP['hist'][start:], EP['result_hist'][start:])
+        state['grasp_experience'] = JO.grasp_experience(state, target_history)
     # Store the exact observation sent to Jev; no privileged diagnostic fields.
     EP['vision_serial'] += 1
     paths = {}
