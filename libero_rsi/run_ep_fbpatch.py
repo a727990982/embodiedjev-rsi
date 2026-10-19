@@ -18,7 +18,7 @@ Jev receives task todo, same-frame images/proprioception, measured motion/contac
 Close/release applicability is checked by the executor; unchanged failed waypoints require recovery.
 Codex planning help: the existing ask_astra/consult_astra intent names request Codex; hard rules and a spectator Jev may request synchronous help on distress signals; general help shares MAX_SLOW; one additional motion-obstruction diagnosis is available after exhaustion (if MAX_SLOW > 0).
 Codex handles episode-start global planning and sync/async slow-think. Astra, invoked through Codex CLI, handles visual perception and identity verification; Jev selects each intent. Model roles are fixed.
-Start planning includes task_todo; Astra reviews outcome progress on current images. Jev selects applicable actions for the active objective.
+Start planning includes task_todo; Jev reviews outcome progress on current images after actions. Jev selects applicable actions for the active objective.
 After close_gripper: proprio+lift grasp confirm (log grasp_confirm); secured → lift, suppress push_aside/local_deadend undo.
 Hard local-deadend rule: repeated local stall family (push_aside/clear_reapproach/raise_redescend/lateral) without progress, or push_aside episode/approach cap → retreat + global front relook + SYNCHRONOUS slow-think replan (Codex slow-think); Jev motion held until plan applied.
 Place-phase: after carry_to_place reached, N consecutive lower_to_place stall/timeout (MAX_PLACE_LOWER_STALL) or M lift↔lower cycles (MAX_PLACE_LIFT_LOWER_CYCLES) while TCP/held XY is over the place region → force open_gripper (log place_force_release); avoid endless lift↔lower thrash over basket.
@@ -33,6 +33,7 @@ sys.path.insert(0, _HERE)
 import jev_choice as JC
 import jev_observation as JO
 import task_todo as TODO
+import jev_todo as JT
 import motion_feedback as MF
 import fine_steps as FS
 import numpy as np
@@ -807,24 +808,20 @@ def _retarget_todo():
     log(t=T[0], todo_target_switch=True, old_id=old_id, new_id=new_id)
 
 
-def _review_task_todo(reason):
-    """Only the main thread reviews and commits progress from current frames."""
-    import coding_agent_slow as CAS
-    _abandon_async_slow('todo_review')
-    proprio, frames = _current_observation()
-    paths = []
-    for name, pixels in frames.items():
-        path = os.path.join(ep_dir, f'todo_{EP["todo_calls"]}_{name}.png')
-        Image.fromarray(pixels).save(path)
-        paths.append(path)
-    updated, rec = CAS.call_todo_review(todo=EP['task_todo'], proprioception=proprio,
-                                       image_paths=paths, step=T[0], reason=reason)
+def _review_task_todo(reason, *, retarget=True):
+    """Jev classifies current outcomes synchronously; only the host commits them."""
+    state, assets = _jev_input()
+    updated, rec = JT.review(state, todo=EP['task_todo'], assets=assets, reason=reason)
     EP['todo_calls'] += 1
-    P['astra_calls'] += 1
-    P['astra_cost'] += rec['cost_usd']
+    # Repeated checks with unchanged statuses must not starve asynchronous help.
+    if [i['status'] for i in updated['items']] != [i['status'] for i in EP['task_todo']['items']]:
+        _abandon_async_slow('todo_progress_changed')
     EP['task_todo'] = updated
+    log(t=T[0], jev_todo_review=rec, observation_serial=EP['vision_serial'])
     _save_task_todo(reason)
-    _retarget_todo()
+    if retarget:
+        _retarget_todo()
+
 
 def _motion_orientation(shape=None):
     shape = SHAPE if shape is None else shape
@@ -3094,8 +3091,7 @@ try:
         CUR['intent'] = it; r = execute(it, ns); dec += 1
         _refresh_task_progress(it, r)
         EP['last_result'] = r
-        if it in ASK_ASTRA_NAMES or it in ('relook', 'retreat') or r in FAIL_RESULTS or 'empty' in str(r):
-            EP['todo_review_due'] = f'{it}:{r}'
+        EP['todo_review_due'] = f'{it}:{r}'
         EP['n_same'] = EP['n_same'] + 1 if it == EP['prev'] else 1; EP['prev'] = it; EP['step'] += 1
         EP['hist'].append(it); EP['tcp_hist'].append(eef())
         EP['result_hist'].append(r); EP['grip_hist'].append(bool(EP['closed']))
@@ -3160,6 +3156,8 @@ try:
     stop = 'finish' if EP['prev'] == 'finish' else ('decision_cap' if dec >= MAX_DEC else None); t_stop = T[0]
     while not DONE[0] and T[0] < HORIZON:
         step([0, 0, 0, 0, 0, 0, 1 if EP['closed'] else -1])
+    if not DONE[0] and EP.get('todo_review_due'):
+        _review_task_todo(EP.pop('todo_review_due'), retarget=False)
     if DONE[0]: end = 'success' if stop is None else f'{stop}_then_success'
     else: end = f'{stop}_not_success' if stop else 'horizon'
     _refresh_task_progress()
@@ -3186,7 +3184,7 @@ res.update(success=bool(DONE[0]), end_reason=end, env_steps=T[0], decisions=dec,
            astra_cost_usd=round(P['astra_cost'], 4), planning_calls=P['planning_calls'],
            planning_cost_usd=round(P['planning_cost'], 4), relooks=P['relook'], fallback_events=fb_events, slow_think_events=slow_events,
            slow_interventions=P['slow'], gate_jev_calls=EP.get('gate_jev_calls', 0), final_patch=PATCH, fallback_lessons=FB_LESSONS, learned_shape=RSHAPE,
-           task_todo=EP.get('task_todo'), todo_review_calls=EP.get('todo_calls', 0),
+           task_todo=EP.get('task_todo'), todo_review_calls=EP.get('todo_calls', 0), todo_review_model=JC.MODEL,
            start_identity=START_ID, identity_events=ID_EVENTS, goal_id=GOAL_ID, goal_target=GOAL_TARGET,
            close_refusals=GOAL_ID.get('close_refusals', 0), moved_most=moved_most, wall_s=round(time.time() - t0, 1),
            motion_diagnosis_used=bool(EP.get('motion_help_used')),

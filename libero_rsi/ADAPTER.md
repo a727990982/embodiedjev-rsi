@@ -112,7 +112,7 @@ object pose or collision-free-path certification. Lowering requires a previously
 reached destination checkpoint. Loss of grasp, premature reopening or identity
 loss revokes dependent checkpoints; localization/patch revision changes invalidate
 motion waypoints. These operations do not invoke a model, retarget an object,
-alter candidates, or force Jev's next intent. They are distinct from Astra's
+alter candidates, or force Jev's next intent. They are distinct from Jev's
 final-outcome review and do not turn `pending` into a grasp-failure signal.
 
 After a supported grasp and transport, actual `open_gripper` completion enters
@@ -126,20 +126,20 @@ For Jev, `decision_view` nests the old outcome evidence/timestamp under
 `last_visual_review`; current stage progress has its own timestamp. Saved todo
 artifacts retain the original review fields as well as stage progress.
 
-For a pending/uncertain post-release outcome, Astra must return `needs_regrasp`:
+For a pending/uncertain post-release outcome, Jev answers an additional Choice question mapped to `needs_regrasp`:
 true for visible failed placement requiring another grasp, false when only
 clearance/verification remains, or null if uncertain. Only true revokes the
 placement attempt's progress. This prevents a successful release with the gripper
 still near the rim from incorrectly restarting the grasp stages.
 
-After release, relook, retreat, help, failure, or a premature finish request,
-Astra reviews every item using a new same-frame image/sensor snapshot. A complete
+After each executed intent, including forced intents,
+Jev reviews every item using a new same-frame image/sensor snapshot. A complete
 review returns each id with `pending`, `done`, `uncertain` or `unobserved` and an
-evidence explanation. `unobserved` retains its previous status/evidence/timestamp;
+classification record linked to frames and probabilities. `unobserved` retains its previous status/evidence/timestamp;
 it cannot create a new completion. Explicit contradictory evidence can reset a
 done item. Malformed reviews stop the episode rather than fabricate progress.
 
-The main thread owns todo updates. Each review abandons outstanding slow advice.
+The main thread owns todo updates. Only changed item statuses abandon outstanding slow advice.
 A target switch additionally clears grasp/approach state, refreshes depth-based
 controller keypoints for that specific target, and verifies the marked grasp
 identity. A planner's identity assertion never substitutes for verification.
@@ -164,3 +164,5 @@ Libraries must pass `validate.py` before a simulator is created. A recovery exce
 The monitor receives the initial plan, current todo/active goal, controller facts and episode lessons. Todo and active goal are detached with the asynchronous snapshot. A plan's `relook` step invokes visual perception; keypoints included in a planning reply trigger a visual refresh rather than replacing the perception base directly. Start-planning failures prevent entry into the Jev loop.
 
 The adapter rejects nonzero CLI exit codes even if stdout contains JSON. Missing requested images, malformed/nonfinite geometry, and invalid plan adjustments are errors. Planning calls and visual calls are counted separately; zero cost from the CLI adapter is an unmeasured placeholder.
+
+Todo review receives the canonical host todo separately from the decision view. Historical evidence survives unobserved outcomes, while previous verdicts and stage checkpoints are hidden from the classifier. Post-release regrasp questions share the same image request. Reviews run after each intent; only changed item statuses invalidate asynchronous planning.

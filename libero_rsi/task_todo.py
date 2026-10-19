@@ -187,8 +187,8 @@ def decision_view(todo):
         'the destination; do not reopen merely because the overall outcome is pending. '
         'last_visual_review is historical and can predate the current grasp/lift. '
         'Current images and proprioception take priority. '
-        'Do not count a command as completion. If a completed goal is contradicted, ask Astra '
-        'to review it. Empty, slipped or wrong-object grasps require recovery within the active goal. '
+        'Do not count a command as completion. If a completed goal is contradicted, let Jev '
+        'review it before acting. Empty, slipped or wrong-object grasps require recovery within the active goal. '
         'Only official_success establishes full task success.'
     )
     return result

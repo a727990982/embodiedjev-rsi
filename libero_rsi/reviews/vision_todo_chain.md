@@ -10,7 +10,9 @@ The production runner now follows this chain:
    actual image assets. Cached perception/predicate/experience state is absent.
 4. Jev selects a candidate described by its applicability and executor behavior.
    Reopening an empty/wrong grasp happens in place; re-alignment is a later choice.
-5. Astra reviews todo progress at release/relook/retreat/help/failure checkpoints.
+5. Jev reviews every todo item from a new observation after each executed intent,
+   before the next action selection. One multi-question request checks all items;
+   the host commits the validated reply and switches the target first.
    Visible evidence can advance or reopen goals. Occluded goals preserve their
    previous evidence timestamp; they are not newly confirmed. A changed active
    object invalidates prior slow advice and grasp/approach state before relocalizing.
@@ -24,7 +26,7 @@ progress or Jev input. The old text-only Jev state/instruction builders were
 removed. Controller geometry, library DSL recoveries and deterministic safety
 gates remain; forced recoveries are still distinguishable in decision logs.
 
-## Verification on 2026-10-19
+## Earlier verification of PR #4 (Astra review version)
 
 - All 21 offline smoke scripts passed, including the full top-level harness with
   fake environment/model services and a start-plan failure scenario.
@@ -40,3 +42,18 @@ These are code and offline execution results. No live Astra/Jev call or full
 LIBERO episode was launched for this change. They do not establish improved
 decisions, real rendering/physics compatibility or recovery/task success rates.
 See [ADAPTER.md](../ADAPTER.md) for credentials, runtime requirements and input fields.
+
+## Jev progress review update
+
+`jev_todo.py` replaces the Astra progress-review call with TypeSafe Choice
+questions using precise per-object completion conditions. It keeps uncertainty,
+occlusion history, rollback and official completion semantics. Read the current
+[adapter contract](../ADAPTER.md#jev-inputs-and-todo-lifecycle) for scheduling,
+response logging and model-call counters. The classifier's old status/evidence
+are omitted from its request; the host retains them for occlusion handling.
+
+The progress call remains synchronous and separate from action selection.
+Completed/failed motion commands alone do not set done flags. Astra remains
+responsible for initial task definitions, localization, identity and recovery
+help. This change has offline transport and full-entrypoint tests; live model
+completion accuracy and robot performance require separate episode evidence.
