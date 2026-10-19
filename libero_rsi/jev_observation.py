@@ -14,6 +14,10 @@ FIELDS = ('gripper_xyz_m', 'gripper_orientation_xyzw', 'finger_joint_positions_m
 INSTRUCTIONS = (
     'Choose one immediate intent using task_todo, CURRENT camera images and proprioception. '
     'Todo goals are desired outcomes, not current visual facts or a fixed motor sequence. '
+    'Use the active object progress stages and next_stage to distinguish grasp, lift, '
+    'transport and placement. A pending final outcome does not mean the grasp failed. '
+    'Preserve a currently confirmed target grasp while advancing toward placement. '
+    'last_visual_review may predate the latest executor checkpoints. '
     'Respect candidate applicability conditions. If the target is not visible or alignment '
     'is uncertain, relook or ask_astra; do not move blindly using remembered positions. '
     'A close command does not prove a grasp. Nearly closed fingers without contact cannot '

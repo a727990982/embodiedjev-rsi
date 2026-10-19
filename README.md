@@ -24,6 +24,23 @@ visual completion condition. A multi-object task has one complete outcome per
 requested object. Planning never marks an item done. The current todo is saved
 in `task_todo.json`, with updates also recorded in `decisions.jsonl`.
 
+Each object has six nested progress checkpoints: verify identity, secure grasp,
+lift clear, carry above the destination, lower for release, and release/retreat
+with verified final placement. The executor refreshes these before decisions and
+after actions/recovery using grasp confirmation, current tactile support and
+completed motion results. After a confirmed grasp and completed lift, Jev sees
+those checkpoints checked and `next_stage=carry_to_destination`. Losing the
+grasp or reopening prematurely resets the dependent checkpoints. A refreshed
+localization invalidates old motion waypoints. These updates make no model calls
+and do not change the active object or force an action sequence.
+
+Jev sees older scene descriptions under `last_visual_review`, separate from the
+fresh `progress` and `current_grasp_confirmed` fields. A pending final outcome
+does not mean grasping failed. An expected release still awaits visual placement
+review; sending an open command never checks off the final outcome. Successful
+placement can make an unobserved intermediate checkpoint `not_required`, which
+does not claim that the corresponding motion was executed.
+
 Acting Jev receives the todo, current front/wrist images (wrist when available),
 end-effector pose, finger joint positions/opening, commanded open/closed state,
 per-finger contacts and official success. All images and sensors come from the
@@ -35,7 +52,8 @@ Acting Jev additionally receives the last eight completed intent/result pairs,
 plus the consecutive count of the same intent and the same intent/result pair.
 Counts cover the full trailing streak even when it exceeds eight actions.
 These are past executor outcomes, not assertions about the current scene or
-task completion. Candidate wording and decision instructions are unchanged.
+task completion. Candidate applicability remains unchanged; the instructions
+also explain how to use stage progress and preserve a confirmed grasp.
 `lift`, `carry_to_place` and `lower_to_place` are offered only with a confirmed
 target grasp supported by current gripper contacts/opening. The executor repeats
 this check, including for forced actions, and never implicitly closes an empty
