@@ -39,18 +39,45 @@ and individual contact booleans from one simulation step. `_jev_input` adds the
 language goal, todo and official success, encodes image assets and logs matching
 frames. Contact flags never identify the touched object.
 
-Neither acting nor spectator Jev gets cached grasp/place coordinates, `seen_held`,
-geometry-derived predicates, predicate meanings or active recovery matches.
-Acting additionally receives `execution_history`: the last eight completed
-intent/result pairs, the last intent, and full trailing counts for the same
-intent and the same intent/result pair. Forced high-level actions are included
-because they were executed. These records describe past executor outcomes;
-they do not assert that an object is currently held or that a goal is complete.
-Spectator additionally gets actual recent intent/result events and help budgets.
-Controller geometry and predicates stay in the executor and planner context;
-they are not deleted from the system. Nested todo `progress` exposes discrete
-executor checkpoints and a sensor-refreshed `current_grasp_confirmed` flag,
-not coordinates or cached visual held estimates.
+Acting and spectator Jev receive `motion_context`: robot-part contacts, last
+commanded waypoint and actual displacement, remaining error, blocked intents,
+help budgets, and a close-position check against the visual grasp estimate.
+Robot contacts include fingers, palm/wrist and arm against the environment
+(including fixtures), plus self-contact. They expose no other-body names, IDs,
+poses or forces. Contact is not automatically classified as blockage.
+
+The last failed motion includes a historical front/wrist before-image, separately
+labelled from current camera assets; Astra's monitor receives the same temporal
+pair. Startup obstacle advice is also historical. The startup overlay shows only
+the proposed TCP route. Finger opening is not full hand width, and full arm
+swept-volume collision checking is absent. Astra must report uncertainty for
+occluded or otherwise unverified clearance.
+
+Acting additionally receives the last eight completed intent/result pairs and
+full trailing repetition counts, including forced high-level actions. These are
+past outcomes, not current scene truth. Todo progress retains the sensor-refreshed
+grasp flag. Cached visual held estimates, library predicates and simulator object
+poses are not included in policy input.
+
+Close requires XY and height proximity to the effective visual grasp estimate
+(including episode offsets). Tolerances are 10–15mm scaled by estimated dimensions,
+allowing controller/vision error while rejecting an above-target close. Position
+is rechecked after any identity relook, including forced execution. Refusal returns
+`close_not_executed:not_at_grasp` without closing.
+
+A supported target grasp disables opening approach/retry motions. `open_gripper`
+requires TCP XY within 4cm of the visual place point and height within 1.5cm of
+its estimated release waypoint. Identity/contact loss permits recovery again.
+This is estimated geometry, not verified object placement.
+
+An unchanged failed waypoint is withheld (6mm target / 3 degree orientation
+comparison), including forced calls. Changed geometry/orientation or successful
+back-off permits retry. `back_off` preserves the grip; `clear_reapproach` and
+`change_approach_yaw` reuse the existing executor when no current target hold is
+supported. Exhausted relook/help choices are removed. General help uses MAX_SLOW;
+one separately recorded motion diagnosis can run after exhaustion when fallback
+is enabled and MAX_SLOW > 0. Failed requests spend the slot too;
+`result.json.motion_diagnosis_used` records it.
 
 Transport candidates (`lift`, `carry_to_place`, `lower_to_place`) require a
 closed gripper, confirmed target identity, a successful grasp confirmation, and

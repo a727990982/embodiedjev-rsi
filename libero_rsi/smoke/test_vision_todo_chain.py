@@ -118,7 +118,7 @@ class VisionTests(unittest.TestCase):
             ep = {'task_todo':todo(), 'vision_serial':0,
                   'hist':['lift','lift'], 'result_hist':['reached','at_target']}
             logged = []
-            scope = functions('_jev_input', JO=JO, EP=ep, LANG='goal', T=[706],
+            scope = functions('_jev_input', _motion_context=lambda:{}, _startup_obstacle_advice=lambda:{}, JO=JO, EP=ep, LANG='goal', T=[706],
                 DONE=[False], Image=Image, ep_dir=temp, log=lambda **kw:logged.append(kw),
                 _current_observation=lambda:(proprio(),{'front':np.zeros((2,2,3),dtype='uint8')}))
             state, _ = scope['_jev_input'](include_execution_history=True)
@@ -208,7 +208,7 @@ class HarnessTests(unittest.TestCase):
         lib = json.loads((ROOT / 'libs' / 'ee_pg_easy_v2_lib.json').read_text())
         commands = []
         ep = {'closed': True, 'grasp_confirm': True, 'grasp_secured_once': True}
-        scope = functions('execute', LIB=lib, ASK_ASTRA_NAMES={'ask_astra', 'consult_astra'},
+        scope = functions('execute', _action_block_reason=lambda *args:None, MOTION_RECOVERIES=set(), LIB=lib, ASK_ASTRA_NAMES={'ask_astra', 'consult_astra'},
             TRANSPORT_INTENTS={'lift', 'carry_to_place', 'lower_to_place'},
             EP=ep, PER={'seen_held': True}, DONE=[False],
             grip=lambda *args: commands.append(args))

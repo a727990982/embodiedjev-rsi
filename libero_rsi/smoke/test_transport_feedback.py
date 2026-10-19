@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import dsl_libero as dsl
 import jev_observation as JO
+import motion_feedback as MF
 from test_review_regressions import functions
 
 TRANSPORT = {'lift', 'carry_to_place', 'lower_to_place'}
@@ -26,9 +27,13 @@ def fixture():
     sensor = {'contacts':(False,False), 'opening':0.002, 'identity':True}
     commands = []
     per = {'seen_held':False, 'obj_h':0.05, 'yaw':0}
-    scope = functions('_transport_grasp_ready', '_acting_menu', 'execute',
+    ns = {'grasp':np.array([0.,0.,0.5]), 'tcp':np.array([0.,0.,0.5]), 'obj_w':.03, 'obj_h':.05, 'place':np.array([1.,1.,.3]), 'clear':.05}
+    scope = functions('_transport_grasp_ready', '_action_block_reason', '_acting_menu', 'execute',
         '_confirm_grasp_after_close', '_jev_input', EP=ep, PER=per, LIB=LIB,
-        TRANSPORT_INTENTS=TRANSPORT, GRASP_FAILED=FAILED, OPEN_MAX=0.08,
+        TRANSPORT_INTENTS=TRANSPORT, GRASP_FAILED=FAILED, OPEN_MAX=0.08, MF=MF,
+        CLOSE_NOT_READY='close_not_executed:not_at_grasp', MOTION_RECOVERIES={'back_off','clear_reapproach','change_approach_yaw'},
+        namespace=lambda:(ns,{}), FALLBACK=True, P={'slow':0,'relook':0}, MAX_SLOW=4, MAX_RELOOK=4,
+        _motion_context=lambda:{}, _startup_obstacle_advice=lambda:{},
         ASK_ASTRA_NAMES={'ask_astra','consult_astra'}, T=[100], DONE=[False],
         contacts=lambda:sensor['contacts'], opening=lambda:sensor['opening'],
         goal_id_confirmed=lambda:sensor['identity'], np=np, dsl=dsl, JO=JO,
@@ -76,7 +81,7 @@ class TransportTests(unittest.TestCase):
 
     def test_failed_grasp_returns_explicit_result_to_next_jev_observation(self):
         scope,ep,sensor,commands=fixture()
-        result=scope['execute']('close_gripper',{})
+        result=scope['execute']('close_gripper',scope['namespace']()[0])
         self.assertEqual(result,FAILED)
         self.assertFalse(ep['grasp_confirm'])
         self.assertFalse(ep['closed'])
@@ -95,7 +100,7 @@ class TransportTests(unittest.TestCase):
         scope,ep,_,_=fixture()
         def fail():raise RuntimeError('injected sensor failure')
         scope['_confirm_grasp_after_close']=fail
-        self.assertEqual(scope['execute']('close_gripper',{}),FAILED)
+        self.assertEqual(scope['execute']('close_gripper',scope['namespace']()[0]),FAILED)
         self.assertFalse(ep['grasp_confirm'])
 
     def test_confirmed_carry_moves_instead_of_returning_closed(self):

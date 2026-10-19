@@ -40,6 +40,7 @@ class RegressionTests(unittest.TestCase):
                 scope = functions('_run_episode_start_plan', 'set_goal_id', 'goal_id_confirmed', 'identity_fields',
                     JX=JX, LIB={'intents': [], 'lessons': []}, dsl=None,
                     EP=ep, GOAL_ID=gid, T=[37], START_ID={'final': {}, 'verify': {}}, per0={},
+                    _approach_geometry=lambda:{}, _save_approach_overlay=lambda geometry:'overlay.png',
                     LANG='put object in basket', ep_dir=temp, log=lambda **kw: None,
                     _account_slow_rec=lambda rec: None, TODO=TODO,
                     _save_task_todo=lambda reason: None, _retarget_todo=lambda: None,
@@ -60,7 +61,8 @@ class RegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             scope = functions('_run_episode_start_plan',
                 JX=JX, LIB={'intents': [], 'lessons': []}, dsl=None, EP={}, T=[0],
-                START_ID={'final': {}, 'verify': {}}, per0={}, LANG='goal', ep_dir=temp,
+                START_ID={'final': {}, 'verify': {}}, per0={},
+                    _approach_geometry=lambda:{}, _save_approach_overlay=lambda geometry:'overlay.png', LANG='goal', ep_dir=temp,
                 goal_id_confirmed=lambda: True, log=lambda **kw: None)
             with patch.object(CAS, 'harness_call_start_plan', side_effect=RuntimeError('codex unavailable')):
                 result = scope['_run_episode_start_plan']()
