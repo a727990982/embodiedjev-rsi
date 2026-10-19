@@ -1,0 +1,124 @@
+{
+  "source": "PR12 bb4b757, 2026-10-19, libero_object task1 init8, init_08_direct; measured robot pose/contact and executor results only",
+  "visual_grasp_estimate": [
+    0.05142539766452259,
+    -0.09521530970909958,
+    0.004314323698295555
+  ],
+  "windows": [
+    [
+      {
+        "step": 76,
+        "intent": "move_above_object",
+        "result": "reached",
+        "tcp": [
+          0.03366008087726179,
+          -0.0954824304452579,
+          0.06036556954863735
+        ],
+        "contacts": []
+      },
+      {
+        "step": 83,
+        "intent": "clear_reapproach",
+        "result": "recovery:clear_reapproach",
+        "tcp": [
+          0.032902366938428546,
+          -0.09628745039096037,
+          0.12956037639069146
+        ],
+        "contacts": []
+      },
+      {
+        "step": 89,
+        "intent": "move_above_object",
+        "result": "reached",
+        "tcp": [
+          0.051420551535740856,
+          -0.09578675922748806,
+          0.0689045859458828
+        ],
+        "contacts": []
+      },
+      {
+        "step": 96,
+        "intent": "clear_reapproach",
+        "result": "recovery:clear_reapproach",
+        "tcp": [
+          0.05709985557065013,
+          -0.09768424876101932,
+          0.1442894220034882
+        ],
+        "contacts": []
+      },
+      {
+        "step": 103,
+        "intent": "move_above_object",
+        "result": "reached",
+        "tcp": [
+          0.06220897505951956,
+          -0.09630747243064049,
+          0.07005216600152783
+        ],
+        "contacts": []
+      }
+    ],
+    [
+      {
+        "step": 569,
+        "intent": "move_above_object",
+        "result": "reached",
+        "tcp": [
+          0.06244792673596215,
+          -0.09801727450908149,
+          0.05613732309335556
+        ],
+        "contacts": []
+      },
+      {
+        "step": 575,
+        "intent": "clear_reapproach",
+        "result": "recovery:clear_reapproach",
+        "tcp": [
+          0.06462081509660458,
+          -0.09824331849176127,
+          0.1134011532779961
+        ],
+        "contacts": []
+      },
+      {
+        "step": 581,
+        "intent": "move_above_object",
+        "result": "reached",
+        "tcp": [
+          0.06352535977247695,
+          -0.0851064075769904,
+          0.05614816045294914
+        ],
+        "contacts": []
+      },
+      {
+        "step": 587,
+        "intent": "clear_reapproach",
+        "result": "recovery:clear_reapproach",
+        "tcp": [
+          0.06583256016881758,
+          -0.08462900610345986,
+          0.11336310545755737
+        ],
+        "contacts": []
+      },
+      {
+        "step": 593,
+        "intent": "move_above_object",
+        "result": "reached",
+        "tcp": [
+          0.06226566536922979,
+          -0.09800298779764936,
+          0.05599011189792652
+        ],
+        "contacts": []
+      }
+    ]
+  ]
+}

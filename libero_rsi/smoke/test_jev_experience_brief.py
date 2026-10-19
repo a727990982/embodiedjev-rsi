@@ -62,12 +62,6 @@ def main():
     # no scene-specific absolute yaw prescriptions in brief text
     assert '90' not in blob and 'ninety' not in blob.lower()
 
-    state = JX.jev_choose_state('pick up the cream cheese', f, LIB, ns=ns, uses={}, dsl=dsl)
-    assert 'experience_brief' in state
-    assert 'observed_facts' in state and 'predicate_meanings' in state
-    instr = JX.jev_choose_instructions(LIB)
-    assert 'experience_brief' in instr
-
     # episode reflections attached when present
     brief2 = JX.build_jev_experience_brief(
         LIB, facts=f, ns=ns, uses={}, dsl=dsl,
@@ -88,7 +82,7 @@ def main():
         'n_lessons': len(brief['lessons']),
         'lesson_ids': [L['id'] for L in brief['lessons']],
         'brief_chars': len(blob),
-        'instr_has_brief': 'experience_brief' in instr,
+        'planner_brief': True,
     }, indent=1))
 
 

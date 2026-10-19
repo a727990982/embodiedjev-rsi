@@ -45,7 +45,7 @@ def note_patch_mutation(patch, goal, updates, source):
 
 def plan_target_update(id_ok, stallish, has_kp, plan_steps):
     calls = []
-    scope = functions('_apply_episode_plan', 'identity_fields', np=np,
+    scope = functions('_apply_episode_plan', 'identity_fields', np=np, AUTO_RECOVERY_RULES=True,
         EP={'closed': False, 'last_result': 'stalled' if stallish else 'reached'},
         LIB={'intents': []}, PATCH={}, NEIGHBOUR_STALL_ISSUES=set(),
         goal_id_confirmed=lambda: id_ok, _should_open_on_intervention=lambda **kw: False,

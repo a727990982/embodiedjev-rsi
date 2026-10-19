@@ -1,4 +1,6 @@
-"""Short actionable experience brief for Jev intent choice.
+"""Short actionable experience brief for Astra/Codex planning.
+
+Acting and spectator Jev use jev_observation instead of cached predicates.
 
 Recoveries + lessons are summarized for the decision-maker — not a full prose dump.
 Triggers stay general (predicate / failure-class level); no scene-specific angles.
@@ -49,11 +51,7 @@ def _recovery_hint(rc: dict) -> str:
     return '; '.join(bits) if bits else ''
 
 
-def _auto_stall_recovery(rc: dict) -> bool:
-    return bool((rc or {}).get('stall_feedback') or (rc or {}).get('approach_change'))
-
-
-def _recovery_line(rc: dict, uses: dict, recovery_menu: str = 'rules') -> dict:
+def _recovery_line(rc: dict, uses: dict) -> dict:
     uid = rc.get('id', '')
     max_u = int(rc.get('max_uses', 3 if 'force_intent' in rc else 1))
     used = int((uses or {}).get(uid, 0))
@@ -67,23 +65,6 @@ def _recovery_line(rc: dict, uses: dict, recovery_menu: str = 'rules') -> dict:
     h = _recovery_hint(rc)
     if h:
         line['hint'] = h
-    # rules: leave the line unchanged. jev/both only annotate auto stall rules.
-    if recovery_menu == 'rules' or not _auto_stall_recovery(rc):
-        return line
-    if recovery_menu == 'jev':
-        line['auto'] = False
-        sf = rc.get('stall_feedback')
-        if isinstance(sf, str):
-            line['prefer'] = sf
-        elif rc.get('approach_change'):
-            line['prefer'] = 'change_approach_yaw'
-        else:
-            line['prefer'] = None
-        line['hint'] = 'automatic stall rule is off; select a recovery intent yourself'
-    elif recovery_menu == 'both':
-        line['auto'] = True
-        extra = 'automatic rule may run before your choice'
-        line['hint'] = (line['hint'] + '; ' + extra) if line.get('hint') else extra
     return line
 
 
@@ -145,17 +126,14 @@ def build_jev_experience_brief(
     max_recoveries: int = 6,
     max_lessons: int = 5,
     max_active: int = 3,
-    recovery_menu: str = 'rules',
 ) -> Dict[str, Any]:
-    """Build a compact experience_brief for JC.choose state.
+    """Build a compact experience_brief for planner context.
 
     - active_recoveries: triggers true right now (if ns+dsl given), still have uses left
     - recoveries: short catalog of when→prefer (+hint)
     - lessons: relevant when→instead (scored against current facts), not full library prose
     - episode_reflections: in-episode fallback lessons, if any (short)
     - episode_start_plan: Great Wall start prior (step1_must / phase_order / risks); follow unless contradicted
-    - recovery_menu: ``rules`` (default) leaves this brief unchanged. ``jev`` marks automatic
-      stall rules as off. ``both`` marks that those rules may still run before the choice.
     """
     facts = facts or {}
     uses = uses or {}
@@ -164,7 +142,7 @@ def build_jev_experience_brief(
     active: List[dict] = []
     catalog: List[dict] = []
     for rc in lib.get('recoveries', []) or []:
-        line = _recovery_line(rc, uses, recovery_menu=recovery_menu)
+        line = _recovery_line(rc, uses)
         catalog.append(line)
         if ns is not None and dsl is not None and line['uses_left'] > 0:
             try:
@@ -206,11 +184,11 @@ def build_jev_experience_brief(
     if ep_lines:
         brief['episode_reflections'] = ep_lines
     if episode_start_plan and isinstance(episode_start_plan, dict):
-        # Compact prior for Jev: follow unless evidence contradicts; mid slow-think fine-tunes only.
+        # Compact historical prior for the planner: follow unless evidence contradicts; mid slow-think fine-tunes only.
         brief['episode_start_plan'] = {
             'note': (
-                'Episode-start Great Wall prior. Prefer intents consistent with step1_must / '
-                'phase_order unless current contact/identity evidence contradicts. Mid-episode '
+                'Episode-start Great Wall prior. Consider the historical step1_must / '
+                'phase_order only when current images and task_todo agree. Mid-episode '
                 'slow-think only fine-tunes; do not replan from zero.'
             ),
             'step1_must': episode_start_plan.get('step1_must'),
@@ -219,54 +197,4 @@ def build_jev_experience_brief(
             'issue': episode_start_plan.get('issue'),
             'plan': list(episode_start_plan.get('plan') or [])[:3],
         }
-    if recovery_menu == 'jev':
-        brief['note'] += (
-            ' Automatic stall-feedback rules are off. Choose raise_redescend, lateral_recenter, '
-            'change_approach_yaw, clear_reapproach, or push_aside, and read recent_recovery_outcomes.'
-        )
-    elif recovery_menu == 'both':
-        brief['note'] += (
-            ' Recovery intents are available. Automatic stall-feedback rules still run first when their trigger matches.'
-        )
     return brief
-
-
-def jev_choose_state(
-    task: str,
-    facts: dict,
-    lib: dict,
-    ns=None,
-    uses=None,
-    episode_lessons=None,
-    episode_start_plan=None,
-    dsl=None,
-    recovery_menu: str = 'rules',
-) -> dict:
-    """Full JC.choose state dict including experience_brief."""
-    return {
-        'task': task,
-        'observed_facts': facts,
-        'predicate_meanings': {
-            p['name']: p.get('meaning', '') for p in lib.get('predicates', [])
-        },
-        'experience_brief': build_jev_experience_brief(
-            lib, facts=facts, ns=ns, uses=uses,
-            episode_lessons=episode_lessons,
-            episode_start_plan=episode_start_plan, dsl=dsl,
-            recovery_menu=recovery_menu,
-        ),
-    }
-
-
-def jev_choose_instructions(lib: dict, extra: str = '') -> str:
-    base = lib.get(
-        'intent_instructions',
-        'Select the next intent whose definition matches observed_facts.',
-    )
-    tip = (
-        ' Also weigh experience_brief: active recoveries (when→prefer) and relevant '
-        'lessons (when→instead). Stay consistent with them when facts match. '
-        'If experience_brief.episode_start_plan is present, honour step1_must / phase_order '
-        'unless current evidence clearly contradicts (then recover via stall menu / ask_astra).'
-    )
-    return base + tip + ((' ' + extra) if extra else '')
