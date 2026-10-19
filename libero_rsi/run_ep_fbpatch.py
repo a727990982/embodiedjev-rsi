@@ -34,6 +34,7 @@ import jev_choice as JC
 import jev_observation as JO
 import task_todo as TODO
 import motion_feedback as MF
+import fine_steps as FS
 import numpy as np
 import dsl_libero as dsl
 from validate import validate
@@ -68,7 +69,10 @@ MOTION_RECOVERIES = frozenset({'back_off', 'clear_reapproach', 'change_approach_
 FAIL_RESULTS = frozenset({'timeout', 'stalled', GRASP_FAILED, CLOSE_NOT_READY} |
                          {f'{name}_not_executed:grasp_unconfirmed' for name in TRANSPORT_INTENTS})
 OPEN_MAX = 0.08  # Panda gripper spec (robot spec, not scene)
+FINE_STEPS = FS.enabled_flag()
 LIB = json.load(open(LIBP))
+if FINE_STEPS:
+    FS.apply_fine_steps(LIB, True)
 validate(LIB)  # Reject invalid libraries before creating a simulator or making model calls.
 ASK_ASTRA_NAMES = frozenset({'ask_astra', 'consult_astra'})
 GATE_JEV = os.environ.get('GATE_JEV', '1') != '0'  # spectator Jev gate (旁观者清); 0 disables
@@ -670,7 +674,7 @@ def namespace():
     dxy = PATCH.get('grasp_dxy_objw') or [0.0, 0.0]
     g = PER['grasp'] + np.array([float(dxy[0]) * PER['obj_w'], float(dxy[1]) * PER['obj_w'],
                                  (PATCH['grasp_dz_objh'] + RSHAPE['dz']) * PER['obj_h']])
-    ns = {'tcp': tcp, 'opening': opening(), 'left_contact': l, 'right_contact': r, 'contact': c, 'ever_contact': EP['ever_contact'],
+    ns = {'fine_unit': FS.FINE_UNIT_M, 'tcp': tcp, 'opening': opening(), 'left_contact': l, 'right_contact': r, 'contact': c, 'ever_contact': EP['ever_contact'],
           'closed_cmd': EP['closed'], 'released': EP['released'], 'seen_held': PER['seen_held'],
           'grasp': g, 'objc': PER['objc'], 'place': PER['place'], 'obj_h': PER['obj_h'], 'obj_w': PER['obj_w'], 'clear': PER['clear'], 'open_max': OPEN_MAX,
           'tcp_at_close': EP['tcp_at_close'] if EP['tcp_at_close'] is not None else tcp,
@@ -720,6 +724,8 @@ def _jev_input(*, include_execution_history=False):
     proprio, frames = _current_observation()
     state, assets = JO.build_state(LANG, EP['task_todo'], proprio, frames, T[0], DONE[0])
     state['motion_context'] = _motion_context()
+    if FINE_STEPS:
+        state['motion_context'].update(FS.fine_step_fact(True, EP.get('last_fine_step')))
     state['startup_obstacle_advice'] = _startup_obstacle_advice()
     failed_motion = EP.get('last_failed_motion') or EP.get('last_motion', {})
     failed_image = EP.get('failed_motion_before_path') or EP.get('motion_before_path')
@@ -1932,6 +1938,42 @@ def do_relook(reason):
         return 'relooked_matched' if matched else 'relooked_unmatched'
     except Exception as e: return 'relook_error'
 
+def _remember_fine_step(rep):
+    EP['last_fine_step'] = rep
+    EP.setdefault('fine_step_events', []).append(dict(rep))
+
+def _execute_fine_step(it, ns):
+    """Servo one clamped world-axis correction. Does not change the gripper command."""
+    name = it.get('name', 'fine_step')
+    closed_before = bool(EP.get('closed'))
+    tcp_now = np.asarray(eef(), float).reshape(3)
+    try:
+        raw = np.asarray(dsl.evaluate(it['refpoint'], ns), float).reshape(3)
+    except Exception:
+        rep = FS.fine_step_report(name, 'refpoint_error', tcp_now, np.zeros(3), closed_before)
+        _remember_fine_step(rep)
+        return 'refpoint_error'
+    tgt, delta, status = FS.clamp_fine_target(tcp_now, raw)
+    if status != 'ok':
+        rep = FS.fine_step_report(name, 'rejected', tcp_now, np.zeros(3), closed_before)
+        _remember_fine_step(rep)
+        return 'rejected'
+    if float(np.linalg.norm(delta)) < FS.FINE_STEP_TOL_M:
+        r = 'at_target'
+    else:
+        # Keep the current approach yaw/tilt (PATCH / RSHAPE / perception). Do not invent a new orientation.
+        try:
+            gain = float(dsl.evaluate(str(it.get('gain', '1')), ns))
+        except Exception:
+            gain = 1.0
+        grip = 1 if closed_before else -1
+        r = servo(tgt, grip, gain, max_steps=FS.FINE_STEP_MAX_STEPS, tol=FS.FINE_STEP_TOL_M)
+    if r in ('reached', 'at_target'):
+        _clear_reapproach_if_aligned('fine_step')
+    rep = FS.fine_step_report(name, r, eef(), delta, bool(EP.get('closed')))
+    _remember_fine_step(rep)
+    return r
+
 def execute(name, ns):
     it = {i['name']: i for i in LIB['intents']}[name]
     act = it.get('action', 'move'); fing = it.get('fingers', 'keep')
@@ -1950,6 +1992,7 @@ def execute(name, ns):
     if blocked and blocked != 'close_refused_identity':
         log(t=T[0], action_not_executed=name, reason=blocked)
         return blocked
+    if act == 'fine_step': return _execute_fine_step(it, ns)
     if name in MOTION_RECOVERIES:
         if name == 'back_off':
             target = eef().copy(); target[2] += max(.04, float(PER['obj_h']))
@@ -3159,6 +3202,9 @@ if VID:
     video_rc = VID.wait()
     res['video_path'] = VIDP
     res['video_exit_code'] = video_rc
+if FINE_STEPS or EP.get('fine_step_events'):
+    res['fine_steps_enabled'] = bool(FINE_STEPS)
+    res['fine_step_events'] = list(EP.get('fine_step_events') or [])
 json.dump(res, open(os.path.join(ep_dir, 'result.json'), 'w'), indent=1, default=lambda o: np.asarray(o).tolist())
 print(json.dumps({k: res[k] for k in ('suite', 'task_id', 'init', 'success', 'end_reason', 'env_steps', 'decisions', 'astra_cost_usd', 'slow_interventions', 'close_refusals', 'wall_s') if k in res}))
 try: env.close()  # explicit EGL teardown (avoid __del__ EGLError at interpreter exit)
