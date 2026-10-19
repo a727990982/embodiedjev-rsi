@@ -17,6 +17,7 @@ import numpy as np
 from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import robot_geometry as RG
+import depth_observation as DO
 import coding_agent_slow as CAS
 from test_review_regressions import functions
 from test_transport_feedback import fixture
@@ -111,7 +112,8 @@ class GeometryTests(unittest.TestCase):
         rgb=np.full((200,400,3),60,dtype='uint8')
         obs={'agentview_image':rgb[::-1],'robot0_eye_in_hand_image':rgb[::-1], 'robot0_eef_quat':[0,0,0,1]}
         with tempfile.TemporaryDirectory() as tmp:
-            scope=functions('astra_geometry','remember_geometry_advice','perceive',RG=RG,np=np,Image=Image,
+            scope=functions('astra_geometry','remember_geometry_advice','perceive',RG=RG,DO=DO,np=np,Image=Image,
+                depth_views=lambda:{'front':np.ones((200,400)), 'wrist':np.full((200,400),.4)},
                 m=m,sim=SimpleNamespace(data=d),obs=obs,EP=ep,ep_dir=tmp,T=[7],
                 eef=lambda:np.array([.2,0,-.05]),rgbd=lambda:(rgb,np.ones((200,400))),
                 _active_language_goal=lambda:'put target in destination',S=400,ASTRA_EFFORT='xhigh',
@@ -127,6 +129,8 @@ class GeometryTests(unittest.TestCase):
             self.assertEqual(len(images),4)
             self.assertTrue(all(Path(p).is_file() for p in images))
             self.assertIn('robot0_arm',prompt);self.assertNotIn('secret_object',prompt)
+            self.assertIn('depth_views',prompt)
+            self.assertIn('path_candidates',prompt)
             self.assertIn('Jev chooses the next action',prompt)
             self.assertEqual(ep['robot_geometry_advice']['target_id'],'target')
             self.assertNotIn('plan',ep['robot_geometry_advice'])

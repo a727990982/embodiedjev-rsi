@@ -71,6 +71,8 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
         def observation(self):
             return {'agentview_image': np.zeros((512,512,3), dtype=np.uint8),
                     'agentview_depth': np.ones((512,512,1)) * .5,
+                    'robot0_eye_in_hand_image': np.zeros((512,512,3), dtype=np.uint8),
+                    'robot0_eye_in_hand_depth': np.ones((512,512,1)) * .3,
                     'robot0_eef_pos': self.tcp.copy(),
                     'robot0_eef_quat': np.array([0.,0.,0.,1.]),
                     'robot0_gripper_qpos': np.array([.04,-.04])}
@@ -157,6 +159,12 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
     def codex(prompt, images, **kwargs):
         assert all(Path(p).exists() for p in images)
         assert 'robot_geometry' in prompt and 'gripper0_hand' in prompt
+        assert 'depth_views' in prompt  # Numeric metadata accompanies every route.
+        assert 'Depth-aware path selection' in prompt
+        panels = [p for p in images if Path(p).name.startswith('geometry_')]
+        assert len(panels) == 2
+        from PIL import Image
+        assert all(Image.open(p).size == (1024,560) for p in panels)
         assert 'secret_object' not in prompt and 'secret_joint' not in prompt
         assert any(Path(p).name.startswith('geometry_') for p in images)
         assert len(images) <= 4

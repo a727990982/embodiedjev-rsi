@@ -7,6 +7,7 @@ not silhouettes, collision tests, visibility masks or future configurations.
 from itertools import product
 import numpy as np
 from PIL import Image, ImageDraw
+import depth_observation as DO
 
 PREFIXES = ('robot0_', 'gripper0_', 'mount0_')
 CORNERS = np.array(list(product((-1., 1.), repeat=3)))
@@ -31,7 +32,7 @@ Return an additional robot_geometry_advice object with:
 This object is advisory ONLY. Jev chooses the next action. Do not copy geometry-only
 suggestions into executable plan steps; existing independently justified recovery
 plans remain subject to the existing protocol.
-'''
+''' + DO.INSTRUCTIONS
 
 
 def _name(model, kind, index):
@@ -229,4 +230,15 @@ def advice(raw):
         result[key] = raw[key].strip()[:500] if isinstance(raw.get(key), str) else ''
     if not result['evidence']:
         result.update(collision='uncertain', visibility='uncertain', evidence='No visual evidence supplied.')
+    candidates = []
+    for item in (raw.get('path_candidates') if isinstance(raw.get('path_candidates'), list) else [])[:3]:
+        if not isinstance(item, dict): continue
+        if item.get('assessment') not in ('preferred', 'blocked', 'unknown'): continue
+        if not all(isinstance(item.get(k), str) and item[k].strip() for k in ('route', 'evidence')): continue
+        candidates.append({k: item[k].strip()[:500] for k in ('route', 'assessment', 'evidence')})
+    if candidates:
+        result['path_candidates'] = candidates
+        selected = raw.get('selected_path')
+        result['selected_path'] = selected if selected in [c['route'] for c in candidates
+                                                          if c['assessment'] == 'preferred'] else 'reobserve'
     return result

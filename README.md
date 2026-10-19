@@ -30,6 +30,28 @@ execution contract, differences from upstream, call accounting and validation.
 
 ## Todo and current-image decisions
 
+Every Astra/Codex perception, identity, start-plan and slow-think request now
+includes aligned metric depth for the available front/wrist cameras. Each
+geometry image is a two-panel RGB-geometry/depth view, leaving the original RGB
+images and their keypoint coordinates unchanged within the four-image limit.
+`robot_geometry.depth_views` includes camera-axis units, a fixed 0.10–2.00 m
+colour scale, valid/saturated fractions and an 8×8 grid of regional minimum,
+10th-percentile and median distances. Full-resolution metric arrays are saved
+as `depth_*.npy`; invalid/far-plane pixels remain unknown. Missing camera depth
+is labelled unavailable, including when robot geometry itself is unavailable.
+
+The visual instructions require depth inspection on every call and comparison
+of direct, raised and lateral corridors for planning. `robot_geometry_advice`
+can carry three evidence-backed `path_candidates` and a `selected_path` to Jev,
+with the existing target/age checks. These are suggestions for available actions;
+the code does not invent a new waypoint program or certify whole-arm swept-volume
+clearance. Hidden surfaces, invalid pixels and future arm configurations remain
+unknown. No simulator object poses, names or collision oracle are supplied.
+
+Offline checks cover buffer conversion/alignment, regional obstacle evidence,
+missing and saturated depth, advice delivery and all existing Codex request
+routes. Real-model depth interpretation and collision avoidance remain untested.
+
 Astra perception/identity, startup planning and slow-think now receive a
 `robot_geometry` snapshot and annotated current camera views alongside original
 images (within the existing four-image request limit). The snapshot reads only

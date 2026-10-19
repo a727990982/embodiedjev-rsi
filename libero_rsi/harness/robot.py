@@ -131,6 +131,26 @@ def rgbd():
     return rt.obs['agentview_image'][::-1].copy(), CU.get_real_depth_map(rt.sim, rt.obs['agentview_depth'])[..., 0][::-1].copy()
 
 
+def depth_views():
+    """Convert current camera buffers to aligned optical-axis metres, without stepping."""
+    from robosuite.utils import camera_utils as CU
+    views = {}
+    for view, name in (('front', 'agentview'), ('wrist', 'robot0_eye_in_hand')):
+        raw = rt.obs.get(name + '_depth')
+        if raw is None:
+            views[view] = None
+            continue
+        raw = np.asarray(raw)
+        if raw.ndim == 3 and raw.shape[-1] == 1:
+            raw = raw[..., 0]
+        if raw.ndim != 2:
+            raise ValueError(f'Unexpected {view} depth shape: {raw.shape}')
+        metric = np.asarray(CU.get_real_depth_map(rt.sim, raw), float)
+        valid = np.isfinite(raw) & (raw >= 0) & (raw < 1) & np.isfinite(metric) & (metric > 0)
+        views[view] = np.where(valid, metric, np.nan)[::-1].copy()
+    return views
+
+
 def bp(uv, dep):
     u, v = int(np.clip(round(uv[0]), 2, S - 3)), int(np.clip(round(uv[1]), 2, S - 3))
     d = float(np.median(dep[v - 2:v + 3, u - 2:u + 3])); return rt.CP + rt.RM @ np.array([(uv[0] - S / 2) / rt.F, -(uv[1] - S / 2) / rt.F, -1.0]) * d

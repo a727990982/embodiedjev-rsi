@@ -1,5 +1,15 @@
 # LIBERO harness runtime contract
 
+All harness Astra/Codex visual routes attach same-step RGB-geometry/depth panels
+and `robot_geometry.depth_views`. Depth buffers are converted to optical-axis
+metres with the simulator's camera conversion, vertically aligned with RGB and
+detached before async work. Only rendered depth is read, not scene-object poses.
+The original RGB images remain the coordinate reference for front keypoints.
+Panels retain native pixels and add a grid/legend; raw metric arrays are persisted
+separately. Missing/invalid depth is explicit and never interpreted as free space.
+Planning prompts request depth-grounded route comparisons; optional descriptive
+path candidates are passed through the existing geometry advice to acting Jev.
+
 Standard move execution uses two sequential acting decisions: the existing intent
 Choice followed by one `choose_questions` request containing X/Y/Z and fingers.
 Both use current images and own-robot measurements. The motor context adds only
