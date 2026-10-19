@@ -52,7 +52,11 @@ def warn(where, exc, once=False, **ctx):
     rec.update(ctx)
     NONFATAL.append(rec)
     if rt.logf is not None and not rt.logf.closed:
-        log(t=T[0], ev='harness_warning', **rec)
+        try:
+            log(t=T[0], ev='harness_warning', **rec)
+        except Exception as log_exc:
+            # Keep both failures for result.json; do not retry the failed log sink.
+            rec['log_error'] = f'{type(log_exc).__name__}: {log_exc}'[:300]
 
 
 @contextmanager

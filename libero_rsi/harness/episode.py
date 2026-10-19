@@ -304,8 +304,7 @@ def finish_episode(run, end):
                place_force_release=bool(EP.get('place_force_release')),
                place_force_release_reason=EP.get('place_force_release_reason'),
                place_lower_stall_n=int(EP.get('place_lower_stall_n', 0)),
-               place_lift_lower_cycles=int(EP.get('place_lift_lower_cycles', 0)),
-               nonfatal_errors=list(NONFATAL))
+               place_lift_lower_cycles=int(EP.get('place_lift_lower_cycles', 0)))
     if rt.VID:
         try:
             rt.VID.stdin.close()
@@ -320,11 +319,12 @@ def finish_episode(run, end):
     if FINE_STEPS or EP.get('fine_step_events'):
         res['fine_steps_enabled'] = bool(FINE_STEPS)
         res['fine_step_events'] = list(EP.get('fine_step_events') or [])
+    with nonfatal('env_close'):
+        rt.env.close()  # explicit EGL teardown (avoid __del__ EGLError at interpreter exit)
+    res['nonfatal_errors'] = list(NONFATAL)
     with open(os.path.join(rt.ep_dir, 'result.json'), 'w') as f:
         json.dump(res, f, indent=1, default=lambda o: np.asarray(o).tolist())
     print(json.dumps({k: res[k] for k in ('suite', 'task_id', 'init', 'success', 'end_reason', 'env_steps', 'decisions', 'astra_cost_usd', 'slow_interventions', 'close_refusals', 'wall_s') if k in res}))
-    with nonfatal('env_close'):
-        rt.env.close()  # explicit EGL teardown (avoid __del__ EGLError at interpreter exit)
     sys.stdout.flush(); rt.logf.close()
     return res
 

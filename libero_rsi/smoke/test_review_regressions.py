@@ -283,6 +283,36 @@ class RegressionTests(unittest.TestCase):
         state.reset()
         self.assertEqual(state.NONFATAL, [])
 
+    def test_nonfatal_survives_warning_log_write_and_flush_failures(self):
+        from harness import state
+
+        class BrokenLog:
+            closed = False
+
+            def __init__(self, operation):
+                self.operation = operation
+
+            def write(self, text):
+                if self.operation == 'write':
+                    raise OSError('injected write failure')
+
+            def flush(self):
+                if self.operation == 'flush':
+                    raise OSError('injected flush failure')
+
+        self.addCleanup(state.reset)
+        for operation in ('write', 'flush'):
+            with self.subTest(operation=operation):
+                state.reset()
+                state.rt.logf = BrokenLog(operation)
+                with state.nonfatal('diagnostic_log'):
+                    state.log(diagnostic=True)
+                self.assertEqual(len(state.NONFATAL), 1)
+                record = state.NONFATAL[0]
+                self.assertEqual(record['where'], 'diagnostic_log')
+                self.assertEqual(record['error'], f'OSError: injected {operation} failure')
+                self.assertEqual(record['log_error'], f'OSError: injected {operation} failure')
+
     def test_all_shipped_libraries_validate(self):
         for path in (ROOT / 'libs').rglob('*.json'):
             with self.subTest(path=path.name):
