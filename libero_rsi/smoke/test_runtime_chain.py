@@ -46,11 +46,19 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
             self.count = 0
             names = ['gripper0_finger1_collision', 'gripper0_finger1_pad_collision',
                      'gripper0_finger2_collision', 'gripper0_finger2_pad_collision']
-            model = types.SimpleNamespace(ngeom=4, geom_bodyid=np.zeros(4, dtype=int),
-                geom_name2id=names.index, body_id2name=lambda i: 'world',
-                camera_name2id=lambda name: 0, cam_fovy=np.array([45.]))
-            data = types.SimpleNamespace(ncon=0, contact=[], cam_xpos=np.array([[0., 0., 1.]]),
-                cam_xmat=np.eye(3).reshape(1,9), body_xpos=np.zeros((0,3)))
+            from test_robot_geometry import model_fixture
+            model, data = model_fixture()
+            model.ngeom = 4
+            model.geom_bodyid = np.full(4, 2)
+            model.geom_name2id = names.index
+            model.body_geomadr = np.array([0,0,0,4])
+            model.body_geomnum = np.array([0,0,4,0])
+            model.geom_type = np.full(4, 6)
+            model.geom_size = np.tile([.02,.01,.03], (4,1))
+            model.geom_contype = model.geom_conaffinity = np.ones(4)
+            data.geom_xpos = np.tile([.2,0,0], (4,1))
+            data.geom_xmat = np.tile(np.eye(3).reshape(1,9), (4,1))
+            data.ncon, data.contact = 0, []
             self.sim = types.SimpleNamespace(model=model, data=data)
             self.object_states_dict = {}; self.obj_body_id = {}; self.object_sites_dict = {}
             self.parsed_problem = {'goal_state': []}
@@ -91,6 +99,10 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
         assert stage_progress['next_stage'] == 'secure_grasp'
         assert not stage_progress['current_grasp_confirmed']
         assert 'observed_facts' not in state and 'experience_brief' not in state
+        assert state['robot_geometry_advice']['target_id'] == state['task_todo']['active_id']
+        assert state['robot_geometry_advice']['geometry_status'] == 'available'
+        assert state['robot_geometry_advice']['age_steps'] >= 0
+        assert 'plan' not in state['robot_geometry_advice']
         if not advice_disabled:
             advice = state['grasp_experience']
             assert advice['target_id'] == state['task_todo']['active_id']
@@ -125,6 +137,10 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
     module('jev_choice', choose=choose, choose_questions=choose_questions, MODEL='jev-1.14.0')
     def codex(prompt, images, **kwargs):
         assert all(Path(p).exists() for p in images)
+        assert 'robot_geometry' in prompt and 'gripper0_hand' in prompt
+        assert 'secret_object' not in prompt and 'secret_joint' not in prompt
+        assert any(Path(p).name.startswith('geometry_') for p in images)
+        assert len(images) <= 4
         if 'RED circle+cross' in prompt:
             events.append('identity')
             assert kwargs['model'] == 'gpt-6-astra'
@@ -140,7 +156,7 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
         elif 'episode-START' in prompt:
             events.append('start_plan')
             assert 'approach_geometry' in prompt and 'maximum_finger_opening_m' in prompt
-            assert any(Path(image).name == 'start_approach_overlay.png' for image in images)
+            assert any(Path(image).name.startswith('geometry_start_plan') for image in images)
             assert all(Path(image).is_file() for image in images)
             if fail_start: raise RuntimeError('injected start failure')
             raw = {'matched_language_goal': True, 'issue': 'ok', 'intervene': False,
@@ -153,6 +169,9 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
             events.append('slow_plan')
             raw = {'matched_language_goal': True, 'is_goal_object': None,
                    'issue': 'ok', 'intervene': False, 'plan': []}
+        raw['robot_geometry_advice'] = {'collision':'uncertain','visibility':'robot_occlusion',
+            'evidence':'synthetic current front view','suggestion':'consider back_off',
+            'verify':'inspect target after moving', 'plan':[{'step':'push_aside'}]}
         return raw, {'cost_usd': 0., 'backend': 'codex', 'model': kwargs.get('model', 'test-planner')}
     lib = json.loads((ROOT/'libs'/'lib_seed_shape_prior.json').read_text())
     lib['recoveries'] = []

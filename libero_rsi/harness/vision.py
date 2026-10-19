@@ -12,6 +12,7 @@ import numpy as np
 from PIL import Image
 
 import task_todo as TODO
+import robot_geometry as RG
 
 from . import observation, robot
 from .config import ASTRA_EFFORT, MAX_ESCAPE_LOOK, MAX_RELOOK, PLACE_CLEARANCE_DEFAULT, REAPPROACH_XY_M, S, YAW_EXPLICIT_EPS_DEG
@@ -67,9 +68,13 @@ def perceive(context=None, phase=None):
         wrist_frame = os.path.join(rt.ep_dir, f'perc_{ph}_{P["astra_calls"]}_wrist.jpg')
         _PILImage.fromarray(wrist[::-1]).save(wrist_frame)
         images.append(wrist_frame)
+    geometry, annotated = observation.astra_geometry(f'perceive_{ph}_{P["astra_calls"]}')
+    images.extend(annotated)
+    visual_context = json.dumps({'request_context': context, 'robot_geometry': geometry})
     parsed, rec = CAS.harness_call_perceive(
-        lang=_active_language_goal(), phase=ph, image_paths=images, context=context,
+        lang=_active_language_goal(), phase=ph, image_paths=images, context=visual_context,
         img_size=S, mode='codex', effort=ASTRA_EFFORT)
+    observation.remember_geometry_advice(parsed.get('robot_geometry_advice'), geometry, ph)
     P['astra_cost'] += rec['cost_usd']; P['astra_calls'] += 1; P['last_astra_wall'] = time.time()
     log(t=T[0], perception=True, phase=ph, backend=rec.get('backend'),
         model=rec.get('model'), effort=rec.get('effort'), wall_s=rec.get('wall_s'))
@@ -215,7 +220,16 @@ def verify_grasp_identity(p, rgb, phase='perceive_start_verify'):
     import coding_agent_slow as CAS
     frame = os.path.join(rt.ep_dir, f'identity_{phase}_{P["astra_calls"]}.jpg')
     im.save(frame)
-    parsed, rec = CAS.call_identity_check(prompt, [frame], effort=ASTRA_EFFORT)
+    geometry, annotated = observation.astra_geometry(f'identity_{phase}_{P["astra_calls"]}')
+    prompt += RG.INSTRUCTIONS + '\nrobot_geometry: ' + json.dumps(geometry)
+    images = [frame]
+    wrist = rt.obs.get('robot0_eye_in_hand_image')
+    if wrist is not None:
+        wrist_frame = os.path.join(rt.ep_dir, f'identity_{phase}_{P["astra_calls"]}_wrist.jpg')
+        Image.fromarray(wrist[::-1]).save(wrist_frame)
+        images.append(wrist_frame)
+    parsed, rec = CAS.call_identity_check(prompt, images + annotated, effort=ASTRA_EFFORT)
+    observation.remember_geometry_advice(parsed.get('robot_geometry_advice'), geometry, phase)
     log(t=T[0], identity_verification=True, phase=phase, backend=rec.get('backend'),
         model=rec.get('model'), effort=rec.get('effort'), wall_s=rec.get('wall_s'))
     P['astra_cost'] += rec['cost_usd']; P['astra_calls'] += 1; P['last_astra_wall'] = time.time()

@@ -98,6 +98,7 @@ class CallChainAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             received = []
             scope = functions('_prepare_slow_snapshot',
+                astra_geometry=lambda *a, **kw: ({'status': 'unavailable'}, []),
                 JX=SimpleNamespace(build_jev_experience_brief=lambda *a, **kw: received.append(kw) or {}),
                 LIB={}, dsl=None, EP={'uses': {}, 'start_plan': {'phase_order': ['approach', 'place', 'retreat']}},
                 FB_LESSONS=[{'lesson': 'raise before retry'}], T=[5], PATCH={}, GOAL_TARGET={},

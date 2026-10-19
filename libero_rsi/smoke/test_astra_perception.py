@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image
 from test_review_regressions import functions
 import coding_agent_slow as CAS
+import robot_geometry as RG
 
 
 class CodexVisionTests(unittest.TestCase):
@@ -30,6 +31,8 @@ class CodexVisionTests(unittest.TestCase):
                 rgb = np.zeros((512, 512, 3), dtype=np.uint8)
                 dep = np.ones((512, 512))
                 scope = functions('perceive', 'verify_grasp_identity',
+                    RG=RG, astra_geometry=lambda *a, **kw: ({'status': 'unavailable'}, []),
+                    remember_geometry_advice=lambda *a: None,
                     rgbd=lambda: (rgb, dep), np=np, Image=Image, time=time,
                     obs={'robot0_eye_in_hand_image': rgb.copy()}, ep_dir=temp,
                     LANG='put butter in basket', _active_language_goal=lambda: 'put butter in basket', S=512, T=[3], ASTRA_EFFORT='xhigh',

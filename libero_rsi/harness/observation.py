@@ -1,6 +1,7 @@
 """Policy namespace, Jev inputs, motion context and candidate gating."""
 
 import os
+import json
 
 import numpy as np
 from PIL import Image
@@ -9,6 +10,7 @@ import dsl_libero as dsl
 import fine_steps as FS
 import jev_observation as JO
 import motion_feedback as MF
+import robot_geometry as RG
 
 from . import pose, recovery, robot, vision
 from .config import (ASK_ASTRA_NAMES, CLOSE_NOT_READY, FINE_STEPS, MAX_RELOOK, MAX_SLOW, OPEN_MAX, RECOVERY_MODE, S,
@@ -96,6 +98,11 @@ def _jev_input(*, include_execution_history=False):
         start = EP.get('recovery_history_start', 0)
         target_history = JO.execution_history(EP['hist'][start:], EP['result_hist'][start:])
         state['grasp_experience'] = JO.grasp_experience(state, target_history)
+        advice = EP.get('robot_geometry_advice')
+        if advice and advice['target_id'] == EP.get('todo_target_id'):
+            state['robot_geometry_advice'] = dict(advice, age_steps=T[0]-advice['observation_step'],
+                note='Historical Astra visual assessment, not collision truth or an executable plan. '
+                     'Check current images and choose an available action yourself.')
     # Store the exact observation sent to Jev; no privileged diagnostic fields.
     EP['vision_serial'] += 1
     paths = {}
@@ -105,6 +112,44 @@ def _jev_input(*, include_execution_history=False):
         paths[name] = path
     log(t=T[0], jev_observation=True, state=state, frames=paths)
     return state, assets
+
+
+def astra_geometry(tag, route=None):
+    """Snapshot own robot geometry and save explicitly annotated current views."""
+    frames = {'front': rt.obs['agentview_image'][::-1].copy()}
+    if rt.obs.get('robot0_eye_in_hand_image') is not None:
+        frames['wrist'] = rt.obs['robot0_eye_in_hand_image'][::-1].copy()
+    names = {'front': 'agentview', 'wrist': 'robot0_eye_in_hand'}
+    cameras = {key: (names[key], im.shape[1], im.shape[0]) for key, im in frames.items()}
+    geometry = RG.snapshot(rt.m, rt.sim.data, robot.eef(), rt.obs['robot0_eef_quat'], cameras, T[0])
+    geometry['target_id'] = EP.get('todo_target_id')
+    images = []
+    for view in geometry['cameras']:
+        path = os.path.join(rt.ep_dir, f'geometry_{tag}_{T[0]}_{view}.png')
+        RG.overlay(frames[view], geometry, view, route).save(path)
+        images.append(path)
+    context_path = os.path.join(rt.ep_dir, f'geometry_{tag}_{T[0]}.json')
+    with open(context_path, 'w') as output:
+        json.dump(geometry, output, allow_nan=False)
+    # Recent-decision summaries need the reference, not repeated full geometry tables.
+    log(t=T[0], robot_geometry_status=geometry['status'], geometry_context_path=context_path, geometry_views=images)
+    return geometry, images
+
+
+def remember_geometry_advice(raw, geometry, source):
+    """Store only a current-target visual hypothesis; never queue or apply a motion."""
+    if not geometry or geometry.get('target_id') != EP.get('todo_target_id'):
+        return
+    previous = EP.get('robot_geometry_advice')
+    if previous and previous['observation_step'] > geometry['observation_step']:
+        return
+    advice = RG.advice(raw)
+    if advice is None:
+        return
+    EP['robot_geometry_advice'] = dict(advice, source=source,
+        observation_step=geometry['observation_step'], target_id=geometry.get('target_id'),
+        geometry_status=geometry.get('status', 'unknown'))
+    log(t=T[0], robot_geometry_advice=EP['robot_geometry_advice'])
 
 
 def _motion_context():

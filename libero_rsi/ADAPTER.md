@@ -46,6 +46,22 @@ Robot contacts include fingers, palm/wrist and arm against the environment
 (including fixtures), plus self-contact. They expose no other-body names, IDs,
 poses or forces. Contact is not automatically classified as blockage.
 
+Astra's visual requests also include `robot_geometry`: static dimensions and
+current poses of robot0/gripper0/mount0 bodies, own hinge/slide joints, TCP-relative
+offsets and front/wrist camera calibration. Only own-robot geoms/joints are read
+for this payload. Primitive and compiled-mesh bounds are conservative body-local
+boxes projected onto copies of the current images; original views remain in the
+same request. Boxes are not silhouettes or depth-tested visibility, and no
+scene-object geometry, future-pose rollout or collision query is provided.
+Unsupported elements are listed explicitly. Startup overlays also show the
+estimated TCP/approach/grasp route.
+
+`robot_geometry_advice` is a descriptive Astra hypothesis, not an executable plan.
+Only evidence, collision/visibility labels, suggestion and verification text are
+forwarded to acting Jev, tagged with source step and target. Target changes clear
+advice and older replies do not replace newer ones. Async input geometry/images
+are captured on the main thread; worker threads never read the live simulator.
+
 The last failed motion includes a historical front/wrist before-image, separately
 labelled from current camera assets; Astra's monitor receives the same temporal
 pair. Startup obstacle advice is also historical. The startup overlay shows only

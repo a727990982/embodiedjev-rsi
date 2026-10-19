@@ -9,6 +9,7 @@ Public snapshot of the LIBERO RSI / EmbodiedJev harness. This repo had no prior 
 | `libero_rsi/harness/` | Episode harness package: Jev intents, stall feedback, grasp confirm, local-deadend relook, place force-release. The module map is in `harness/__init__.py`; it can be imported without the simulator. |
 | `libero_rsi/jev_experience.py` | Builds library advice for Astra/Codex planning; cached predicates are not Jev input. |
 | `libero_rsi/grasp_experience.py` | Curated conditional grasp advice for acting Jev, matched from its existing observations. |
+| `libero_rsi/robot_geometry.py` | Own-robot dimensions, joint/body poses, camera projections and visual advice normalization. |
 | `libero_rsi/jev_todo.py` | Jev completion questions, classification records, and atomic progress updates. |
 | `libero_rsi/task_todo.py` | Task objectives, evidence-backed progress, and active object selection. |
 | `libero_rsi/jev_observation.py` | Same-frame camera/proprioception input and applicable intent definitions. |
@@ -20,6 +21,36 @@ Public snapshot of the LIBERO RSI / EmbodiedJev harness. This repo had no prior 
 | `libero_rsi/reviews/*.md` | Design notes for the behaviors below. |
 
 ## Todo and current-image decisions
+
+Astra perception/identity, startup planning and slow-think now receive a
+`robot_geometry` snapshot and annotated current camera views alongside original
+images (within the existing four-image request limit). The snapshot reads only
+the loaded robot0/gripper0/mount0 model bodies, own joint positions/limits and the
+front/wrist camera calibration. It reports link frame offsets, current poses,
+TCP offsets and body-local dimensions from collision/visual geometry. Mesh
+vertices use MuJoCo's compiled transforms; no nominal Franka dimensions are
+hard-coded. Surrounding object poses, meshes and joints are excluded.
+
+Cyan collision-model and magenta visual-model boxes conservatively bound each
+robot body. They are not exact silhouettes: boxes can overlap or show through
+scene objects. Current projections do not certify visibility, clearance, an IK
+solution or a future arm configuration. Unsupported geometry/cameras are listed
+as omissions. Full snapshot JSON and annotated PNGs are saved under `geometry_*`
+and referenced in the decision log; raw images are retained.
+
+Astra can return `robot_geometry_advice` with separate collision and visibility
+assessments, image evidence, a conditional suggestion and an outcome check. The
+host passes descriptive fields to acting Jev with the source step, target and
+age. It never executes that field or changes the action menu. Target switches
+clear it, older replies cannot replace newer advice, and asynchronous results
+still pass the existing freshness checks before acceptance. Existing recovery
+rules remain unchanged. Jev checks current images and selects the action.
+
+Offline tests cover robot-only data selection, primitive/mesh bounds, rectangular
+camera projections, moving wrist-camera poses, near-plane clipping and advice
+delivery without extra calls or movement. An optional MuJoCo test compiles a tiny
+synthetic model and runs forward kinematics without physics steps. This is not
+validation on the deployed LIBERO robot or evidence of better collision avoidance.
 
 Astra (`gpt-6-astra`), invoked through Codex CLI, writes `task_todo` as part of
 `start_plan.json`. Each item names an object, its desired final outcome and a
