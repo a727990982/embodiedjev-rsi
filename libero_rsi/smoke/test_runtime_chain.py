@@ -22,7 +22,7 @@ import coding_agent_slow as CAS
 
 
 def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fault=False, close_fault=False,
-             advice_disabled=False):
+             advice_disabled=False, release_settle=False):
     events = []
     def module(name, **attrs):
         obj = types.ModuleType(name)
@@ -65,7 +65,7 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
             self.parsed_problem = {'goal_state': []}
         def seed(self, seed): pass
         def reset(self): pass
-        def _check_success(self): return not handoff and self.count >= (38 if menus else 18)
+        def _check_success(self): return not handoff and self.count >= (35 if release_settle else (38 if menus else 18))
         def observation(self):
             return {'agentview_image': np.zeros((512,512,3), dtype=np.uint8),
                     'agentview_depth': np.ones((512,512,1)) * .5,
@@ -89,7 +89,7 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
     module('libero.libero.envs', OffScreenRenderEnv=FakeEnv)
     module('robosuite'); module('robosuite.utils', camera_utils=types.SimpleNamespace(get_real_depth_map=lambda sim, depth: depth))
     module('scipy'); module('scipy.spatial'); module('scipy.spatial.transform', Rotation=Rotation)
-    choices = iter(['fine_x_plus_5mm','rotate_yaw_plus_15','retreat'] if menus else (['finish'] * 3 if handoff else ['ask_astra', 'relook', 'retreat']))
+    choices = iter(['open_gripper'] if release_settle else (['fine_x_plus_5mm','rotate_yaw_plus_15','retreat'] if menus else (['finish'] * 3 if handoff else ['ask_astra', 'relook', 'retreat'])))
     active_targets = []
     def choose(state, instruction, criteria, **kwargs):
         assert kwargs.get('assets'), 'Jev must receive real image assets'
@@ -186,8 +186,15 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
     def exit_process(code): raise SystemExit(code)
     env = {'HORIZON': '20', 'MAX_DEC': '3', 'GATE_JEV': '0', 'SLOW_MIN_GAP_S': '0', 'VIDEO': ''}
     if menus: env.update(FINE_STEPS='1',POSE_MENU='1',JEV_RECOVERY_MENU='jev',HORIZON='40')
+    if release_settle: env['HORIZON']='60'
     with patch.dict(os.environ, env, clear=True):
-        from harness import grasping
+        from harness import grasping, executor, state
+    real_execute = executor.execute
+    def at_release_boundary(name, ns):
+        state.EP['closed'] = True  # Inject only the pre-release gripper state; use the real executor/wait.
+        return real_execute(name, ns)
+    release_patch = (patch.object(executor, 'execute', side_effect=at_release_boundary)
+                     if release_settle else contextlib.nullcontext())
     place_patch = (patch.object(grasping, '_note_place_phase', side_effect=KeyError('injected place-phase failure'))
                    if place_fault else contextlib.nullcontext())
     import jev_observation as JO
@@ -195,7 +202,7 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
                     if advice_disabled else contextlib.nullcontext())
     with patch.dict(os.environ, env, clear=True), patch.object(CAS, 'call_codex', side_effect=codex), \
          patch.object(sys, 'argv', ['run_ep_fbpatch.py','fake_suite','0','0',str(library),destination]), \
-         patch.object(os, '_exit', side_effect=exit_process), place_patch, advice_patch:
+         patch.object(os, '_exit', side_effect=exit_process), place_patch, advice_patch, release_patch:
         try:
             runpy.run_path(str(ROOT/'run_ep_fbpatch.py'), run_name='__main__')
         except SystemExit as ex:
@@ -207,7 +214,7 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fa
 
 class RuntimeChainTests(unittest.TestCase):
     def run_scenario(self, fail_start, handoff=False, menus=False, place_fault=False, close_fault=False,
-                     advice_disabled=False):
+                     advice_disabled=False, release_settle=False):
         with tempfile.TemporaryDirectory() as temp:
             args = [sys.executable, __file__, '--fake-run', temp]
             if menus: args.append('--menus')
@@ -216,6 +223,7 @@ class RuntimeChainTests(unittest.TestCase):
             if place_fault: args.append('--place-fault')
             if close_fault: args.append('--close-fault')
             if advice_disabled: args.append('--advice-disabled')
+            if release_settle: args.append('--release-settle')
             run = subprocess.run(args, capture_output=True, text=True, timeout=20)
             result_path = Path(temp)/'fake_suite_t0_i0'/'result.json'
             self.assertTrue(result_path.exists(), run.stdout + run.stderr)
@@ -238,7 +246,7 @@ class RuntimeChainTests(unittest.TestCase):
         self.assertGreaterEqual(result['todo_review_calls'], 1)
         self.assertIsNone(result['task_todo']['active_id'])
         self.assertTrue(all(item['status'] == 'done' for item in result['task_todo']['items']))
-        self.assertGreaterEqual(result['planning_calls'], 3)
+        self.assertEqual(result['planning_calls'], 2)  # Start plan + explicit ask; no duplicate same-state watch.
         self.assertIn('jev:todo_review', events)
         self.assertEqual(result['todo_review_model'], 'jev-1.14.0')
         self.assertLess(events.index('jev:ask_astra'), events.index('jev:todo_review'))
@@ -285,6 +293,21 @@ class RuntimeChainTests(unittest.TestCase):
                     'planning_calls', 'todo_review_calls', 'task_todo'):
             self.assertEqual(result_on[key], result_off[key], key)
 
+    def test_release_can_finish_during_settling_without_more_model_calls(self):
+        run, result, events = self.run_scenario(False, release_settle=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertTrue(result['success'])
+        self.assertEqual(result['env_steps'], 35)
+        self.assertEqual(result['decisions'], 1)
+        self.assertEqual(result['jev_calls'], 1)
+        self.assertEqual(result['planning_calls'], 1)
+        self.assertNotIn('slow_plan', events)
+        self.assertNotIn('jev:todo_review', events)
+        waits = [d['post_release_settle'] for d in self.decisions if 'post_release_settle' in d]
+        self.assertEqual(len(waits), 1)
+        self.assertEqual(waits[0]['settle_steps'], 10)
+        self.assertTrue(waits[0]['official_success'])
+
     def test_start_plan_failure_does_not_enter_jev_loop(self):
         run, result, events = self.run_scenario(True)
         self.assertEqual(run.returncode, 1)
@@ -323,5 +346,5 @@ if __name__ == '__main__':
     if '--fake-run' in sys.argv:
         raise SystemExit(fake_run(sys.argv[2], '--fail-start' in sys.argv, '--handoff' in sys.argv, '--menus' in sys.argv,
                                   '--place-fault' in sys.argv, '--close-fault' in sys.argv,
-                                  '--advice-disabled' in sys.argv))
+                                  '--advice-disabled' in sys.argv, '--release-settle' in sys.argv))
     unittest.main()

@@ -157,6 +157,7 @@ def _motion_context():
     return {'current_robot_contacts': robot.robot_contacts(), 'last_motion': EP.get('last_motion'),
             'current_orientation': robot.orientation_feedback(),
             'last_orientation_motion': EP.get('last_orientation_motion'),
+            'release_finalization': EP.get('release_finalization'),
             'last_failed_motion': EP.get('last_failed_motion'),
             'recovery_validation': _recovery_context(),
             'recovery_control': RECOVERY_MODE,

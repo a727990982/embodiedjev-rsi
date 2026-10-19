@@ -17,10 +17,11 @@ import jev_choice as JC
 import jev_observation as JO
 import recovery_control as RC
 import task_todo as TODO
+import recovery_tracking as TRACK
 from validate import validate
 
 from . import assist, executor, grasping, observation, planning, pose, progress, recovery, robot, state, vision
-from .config import (ASK_ASTRA_NAMES, FINE_STEPS, HORIZON, MAX_DEC, MOTION_RECOVERIES, RECOVERY_MODE,
+from .config import (ASK_ASTRA_NAMES, FAIL_RESULTS, FINE_STEPS, HORIZON, MAX_DEC, MOTION_RECOVERIES, RECOVERY_MODE,
                      STALL_FB_ACTIONS)
 from .state import (CUR, DONE, EP, FB_LESSONS, GOAL_ID, GOAL_TARGET, ID_EVENTS, NONFATAL, P, PATCH, PER, RSHAPE,
                     START_ID, T, log, new_episode_state, nonfatal, rt)
@@ -164,6 +165,13 @@ def _request_help(it, r):
 
     ask_astra already ran sync in execute; else hard-force; else spectator gate; else normal slow-think.
     """
+    if it == 'open_gripper' and EP.pop('just_released', False) and r not in FAIL_RESULTS:
+        planning._abandon_async_slow('post_release_settle')
+        log(t=T[0], post_release_help='deferred_to_current_image_review')
+        return None
+    if it not in ASK_ASTRA_NAMES and TRACK.handled(EP, T[0]):
+        log(t=T[0], automatic_help_skipped='recovery_already_handled')
+        return None
     if it in ASK_ASTRA_NAMES:
         sr, so = f'ask_done:{r}', {'via': 'execute', 'result': r}
         log(dec=rt.dec, t=T[0], slow_think=sr, intent=it, intent_result=r, detail=so, source='ask_astra')
@@ -212,11 +220,15 @@ def run_decision_loop(run):
             P['fb'] += 1; r, pt = assist.do_fallback(trig); run['fb_events'].append({'dec': rt.dec, 'trigger': trig, 'result': r, 'patch': pt})
             log(dec=rt.dec, t=T[0], fallback=trig, result=r, patch=pt)
             CUR.update(fb=f"{trig} -> {r} " + (f"dz={pt['grasp_dz_objh']:+.2f}objh tilt={pt['tilt_deg']} yaw={pt['yaw_deg']}" if pt else ''), fb_t=T[0])
+        if DONE[0] or T[0] >= HORIZON:
+            break  # Recovery itself can finish the task; do not select/execute another intent.
         ns, preds = observation.namespace(); f = observation.facts(ns, preds); forced = None
         # Escape / recovery may have queued a non-close next intent — honor before Jev.
         if EP.get('force_next_intent') and EP['force_next_intent'] in intents:
             forced = EP['force_next_intent']; EP['force_next_intent'] = None
         forced, recovery_mutated = _apply_recovery_rules(ns, intents, forced)
+        if DONE[0] or T[0] >= HORIZON:
+            break
         # B05: recovery mutates pose/PATCH — recompute ns/facts before selection and execute.
         if recovery_mutated:
             ns, preds = observation.namespace(); f = observation.facts(ns, preds)

@@ -4,7 +4,30 @@ import numpy as np
 
 from . import robot, vision
 from .config import FAIL_RESULTS, MAX_PLACE_LIFT_LOWER_CYCLES, MAX_PLACE_LOWER_STALL, OPEN_MAX, PLACE_XY_M
-from .state import EP, PER, T, log, nonfatal, rt
+from .state import DONE, EP, PER, T, log, nonfatal, rt
+
+
+def settle_after_release():
+    """One bounded open-gripper wait per actual release, before any model review."""
+    start = T[0]
+    release = {'target_id': EP.get('todo_target_id'), 'release_step': start,
+               'release_tcp_xyz_m': robot.eef().tolist(),
+               'retreat_height_m': float(robot.eef()[2]) + .06, 'settle_budget_steps': 20}
+    EP['release_finalization'] = release
+    robot.grip(-1, release['settle_budget_steps'])  # step() stops on official success/horizon.
+    release.update(settled_through_step=T[0], settle_steps=T[0]-start, official_success=bool(DONE[0]))
+    EP['recovery_history_mark'] = len(EP.get('hist', []))
+    log(t=T[0], post_release_settle=dict(release))
+
+
+def post_release_retreat_target(target):
+    """A fixed release-relative clearance goal, not another lift on every retry."""
+    release = EP.get('release_finalization')
+    if (release and not EP['closed']
+            and EP.get('todo_target_id') in (release['target_id'], None)):
+        target = np.asarray(target, float).copy()
+        target[2] = max(float(target[2]), release['retreat_height_m'])
+    return target
 
 
 def _place_xy_tol():

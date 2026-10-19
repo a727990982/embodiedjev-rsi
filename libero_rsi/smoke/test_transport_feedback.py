@@ -29,7 +29,7 @@ def fixture():
     per = {'seen_held':False, 'obj_h':0.05, 'yaw':0}
     ns = {'grasp':np.array([0.,0.,0.5]), 'tcp':np.array([0.,0.,0.5]), 'obj_w':.03, 'obj_h':.05, 'place':np.array([1.,1.,.3]), 'clear':.05}
     scope = functions('_transport_grasp_ready', '_action_block_reason', '_acting_menu', 'execute',
-        '_confirm_grasp_after_close', '_jev_input', EP=ep, PER=per, LIB=LIB,
+        '_confirm_grasp_after_close', '_jev_input','settle_after_release','post_release_retreat_target', EP=ep, PER=per, LIB=LIB,
         TRANSPORT_INTENTS=TRANSPORT, GRASP_FAILED=FAILED, OPEN_MAX=0.08, MF=MF,
         CLOSE_NOT_READY='close_not_executed:not_at_grasp', MOTION_RECOVERIES={'back_off','clear_reapproach','change_approach_yaw'},
         namespace=lambda:(ns,{}), FALLBACK=True, P={'slow':0,'relook':0}, MAX_SLOW=4, MAX_RELOOK=4,

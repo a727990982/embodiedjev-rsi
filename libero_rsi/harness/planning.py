@@ -16,6 +16,7 @@ from PIL import Image
 import dsl_libero as dsl
 import jev_experience as JX
 import task_todo as TODO
+import recovery_tracking as TRACK
 
 from . import observation, progress, recovery, robot, vision
 from .config import (AUTO_RECOVERY_RULES, FAIL_RESULTS, HORIZON, MAX_PUSH_ASIDE, MAX_SLOW, NEIGHBOUR_STALL_ISSUES,
@@ -263,6 +264,8 @@ def _stage_fail_grip_unchanged(consume=False):
     If consume=True, arm debounce so we do not re-fire until STAGE_FAIL_N new failures accrue."""
     rh, gh = EP.get('result_hist') or [], EP.get('grip_hist') or []
     n = STAGE_FAIL_N
+    if len(rh) - EP.get('recovery_history_mark', 0) < n:
+        return None
     if len(rh) < n or len(gh) < n:
         return None
     recent_r, recent_g = rh[-n:], gh[-n:]
@@ -284,7 +287,8 @@ def _slow_critical(intent, result):
     # general: repeated timeout/stall with gripper cmd frozen (not intent-name-specific)
     sf = _stage_fail_grip_unchanged(consume=True)
     if sf: return sf
-    h, th = EP['hist'], EP['tcp_hist']
+    start = EP.get('recovery_history_mark', 0)
+    h, th = EP['hist'][start:], EP['tcp_hist'][start:]
     if len(h) >= 3 and h[-1] not in ('finish',) and len(th) >= 3:
         moved = float(np.linalg.norm(th[-1] - th[-3]))
         if len(set(h[-3:])) == 1 and moved < 0.01: return 'no_progress_same_x3'
@@ -606,11 +610,14 @@ def _sync_slow(intent, result, crit):
     reserved = (crit in ('motion_obstruction', 'recovery_no_progress') and MAX_SLOW > 0 and
                 P['slow'] >= MAX_SLOW and not EP.get('motion_help_used'))
     if P['slow'] >= MAX_SLOW and not reserved: return 'slow_cap', None
+    if intent not in ('ask_astra', 'consult_astra') and TRACK.handled(EP, T[0]):
+        return 'recovery_already_handled', None
     if reserved:
         EP['motion_help_used'] = True  # spend once even when the request fails
         crit = 'reserved_motion_obstruction'
     both, rgb, dep = robot._combo_rgb()
     ctx = _slow_ctx(intent, result)
+    TRACK.mark(EP, T[0])  # Also suppress repeated requests after a model-call failure.
     try:
         import coding_agent_slow as CAS
         snapshot = _prepare_slow_snapshot(ctx, crit, 'sync', both, f'sync_{_next_slow_job_id()}')
@@ -624,7 +631,10 @@ def _sync_slow(intent, result, crit):
         issue=parsed.get('issue'), intervene=parsed.get('intervene'),
         plan=parsed.get('plan'), backend=rec.get('backend'))
     # Applying the reply moves the robot; failures there are harness errors, not Codex errors.
-    return _finish_slow(parsed, rec, dep, both, intent, result, 'sync_codex', crit, rt.dec)
+    try:
+        return _finish_slow(parsed, rec, dep, both, intent, result, 'sync_codex', crit, rt.dec)
+    finally:
+        TRACK.mark(EP, T[0])
 
 
 def do_slow_think(intent, result, force=False):
@@ -636,6 +646,7 @@ def do_slow_think(intent, result, force=False):
     """
     if not rt.FALLBACK: return 'disabled', None
     if DONE[0] or T[0] >= HORIZON: return 'done', None
+    if not force and TRACK.handled(EP, T[0]): return 'recovery_already_handled', None
     if intent in ('finish',) and result == 'finish': return 'skip_finish', None
     crit = _slow_critical(intent, result) if not force else (force if isinstance(force, str) else 'forced')
     if force is True: crit = 'forced'

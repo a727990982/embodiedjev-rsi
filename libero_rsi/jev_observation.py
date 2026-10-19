@@ -38,6 +38,9 @@ INSTRUCTIONS = (
     'acquire a new grasp by repeating close. Recover from empty, slipped or wrong-object grasps. '
     'The active todo identifies the requested object; do not confuse another task object with it. '
     'Only official_success proves the whole task has succeeded.'
+    ' release_finalization records the bounded physical settling wait already performed after '
+    'opening and a release-relative retreat height. If official success is still false, '
+    'inspect the current placement; do not mistake repeated no-op commands for settling time.'
     ' robot_geometry_advice, when present, is a timestamped Astra visual hypothesis about '
     'collision/occlusion, not current truth, an IK solution or a forced action. Compare it '
     'with current images and actual motion before choosing an available action.'
@@ -59,7 +62,7 @@ APPLICABILITY = {
     'carry_to_place': 'Use when the active target is securely held and clear of surrounding objects. Carry above its destination while maintaining the grip.',
     'lower_to_place': 'Use when the active target is securely held above its intended destination. Lower to release height while maintaining the grip.',
     'open_gripper': 'Use when the correctly held active target has reached its destination and is ready for release. Open at the current pose. If holding the wrong object or empty, use reopen_and_retry.',
-    'retreat': 'Use after release to raise the empty, open gripper clear of the destination and reveal the placed object for review.',
+    'retreat': 'Use after release to raise the empty, open gripper clear of the destination and reveal the placed object for review. After a placement release the target is at least 6 cm above the recorded release pose; retries reuse that clearance height.',
     'relook': 'Use when current images do not reliably locate the active target or its grasp alignment. Pause target-directed motion and refresh Astra visual localization.',
     'ask_astra': 'Ask Codex/Astra for localization or recovery help when stuck or the active target is unclear. Jev handles routine todo completion checks.',
     'consult_astra': 'Alias of ask_astra: request localization or recovery help.',

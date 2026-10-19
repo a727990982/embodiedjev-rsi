@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import motion_feedback as MF
 import coding_agent_slow as CAS
+import recovery_tracking as TRACK
 from test_review_regressions import functions
 from test_transport_feedback import fixture
 
@@ -83,7 +84,7 @@ class RecoveryTests(unittest.TestCase):
 
     def test_exhausted_budget_uses_shared_reserve_once_even_on_error(self):
         ep={};p={'slow':4};seen=[]
-        scope=functions('_hard_astra_trigger','_sync_slow',EP=ep,P=p,MAX_SLOW=4,FALLBACK=True,
+        scope=functions('_hard_astra_trigger','_sync_slow',TRACK=TRACK,EP=ep,P=p,MAX_SLOW=4,FALLBACK=True,
             _recovery_context=lambda:{'no_progress':True},ASK_ASTRA_NAMES=set(),FAIL_RESULTS={'stalled'},
             SLOW_JOB={'thread':None,'job_id':None},_drain_orphan_slow_costs=lambda:None,
             _combo_rgb=lambda:(None,None,None),_slow_ctx=lambda *args:'{}',
