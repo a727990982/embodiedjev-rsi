@@ -23,6 +23,10 @@ INSTRUCTIONS = (
     'CURRENT cameras to distinguish obstruction, poor alignment, and unreachable estimates. '
     'Do not repeat an unchanged blocked motion. Back off or change the approach, or ask for help '
     'when budget remains. Startup obstacle advice is a prediction, not current evidence. '
+    'Recovery preparation is not a descent test: after retreat/reorientation and reaching above '
+    'the target, inspect current images and test the new approach with descend_to_grasp if clear. '
+    'Do not repeat preparation solely because the grasp is still pending. If the new approach '
+    'still looks obstructed, choose a different approach or request diagnosis. '
     'Respect candidate applicability conditions. If the target is not visible or alignment '
     'is uncertain, relook or ask_astra; do not move blindly using remembered positions. '
     'A close command does not prove a grasp. Nearly closed fingers without contact cannot '
@@ -47,7 +51,7 @@ APPLICABILITY = {
     'consult_astra': 'Alias of ask_astra: request slow-think and a current-image todo review.',
     'finish': 'Use only when official_success is true; placement progress or an all-done todo alone is insufficient.',
     'back_off': 'Move upward a short distance while preserving the current grip, to back away from a failed approach or transport. This does not guarantee clearance; inspect the motion result before proceeding.',
-    'clear_reapproach': 'When not securely holding the target, retreat upward and adjust the approach using existing recovery geometry. Prefer after an obstructed or repeatedly stalled descent; it does not acquire a grasp.',
+    'clear_reapproach': 'Prepare a new approach when not securely holding the target: raise, slightly recenter XY, and adjust estimated grasp height. The executor then queues move_above_object. This action does NOT descend, retry a grasp, or verify that an obstacle is cleared. Do not keep choosing it after preparation without testing the new approach or obtaining new obstruction evidence.',
     'change_approach_yaw': 'When not securely holding the target, retreat and change the commanded approach yaw before approaching again. Use when the current hand orientation appears blocked. This does not prove a collision-free path.',
 }
 

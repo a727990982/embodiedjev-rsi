@@ -87,6 +87,12 @@ Rules:
   when depth/occlusion or unreachable grasp geometry could explain the failure. Do not repeat the
   same unchanged waypoint; prefer retreat/change approach before considering an obstacle push.
 - Prefer intervene=false when progressing normally with confirmed identity.
+- recovery_validation describes completed preparation/approach cycles. clear_reapproach only
+  raises/recenters and queues move_above_object; it does not descend or test clearance.
+  When recovery_validation.no_progress is true, previous preparation has already been tried
+  without useful position/contact progress or a descent test. Reassess the obstacle/approach
+  from current images and the last_failed_motion; do not simply repeat the same preparation.
+  Jev chooses the next descent test after the plan. Explain what changed and remains unverified.
 - Use task_todo and active_goal for the current task objective. The episode_start_plan is historical advice; it must not override current images, a target handoff, or a failed grasp. Preserve appropriate post-place clearance while recovering.
 - Episode-only: do not invent library-wide recoveries here.
 

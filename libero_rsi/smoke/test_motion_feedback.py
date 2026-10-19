@@ -148,7 +148,9 @@ class MotionTests(unittest.TestCase):
         scope,ep,_,_=fixture()
         with tempfile.TemporaryDirectory() as temp:
             p=Path(temp)/'before.png';Image.new('RGB',(2,2)).save(p)
-            ep.update(motion_before_path=str(p),last_motion={'result':'stalled','start_step':12})
+            ep.update(failed_motion_before_path=str(p),
+                      last_failed_motion={'result':'stalled','start_step':12},
+                      last_motion={'result':'reached','start_step':25})
             import jev_observation as JO
             scope['_current_observation']=lambda:({key:0 for key in JO.FIELDS},{'front':np.zeros((2,2,3),dtype='uint8')})
             scope['ep_dir']=temp
@@ -160,6 +162,7 @@ class MotionTests(unittest.TestCase):
     def test_reserved_motion_diagnosis_is_spent_once_even_on_network_error(self):
         ep={};p={'slow':4}
         scope=functions('_sync_slow','_hard_astra_trigger',EP=ep,P=p,MAX_SLOW=4,FALLBACK=True,
+            _recovery_context=lambda:{'no_progress':False},
             ASK_ASTRA_NAMES=set(),FAIL_RESULTS={'stalled'},SLOW_JOB={'thread':None,'job_id':None},
             _drain_orphan_slow_costs=lambda:None,_combo_rgb=lambda:(None,None,None),
             _slow_ctx=lambda *a:'{}',_prepare_slow_snapshot=lambda *a:{'coding_context':{}},
