@@ -22,6 +22,7 @@ After close_gripper: proprio+lift grasp confirm (log grasp_confirm); secured →
 Hard local-deadend rule: repeated local stall family (push_aside/clear_reapproach/raise_redescend/lateral) without progress, or push_aside episode/approach cap → retreat + global front relook + SYNCHRONOUS slow-think replan (Codex slow-think); Jev motion held until plan applied.
 Place-phase: after carry_to_place reached, N consecutive lower_to_place stall/timeout (MAX_PLACE_LOWER_STALL) or M lift↔lower cycles (MAX_PLACE_LIFT_LOWER_CYCLES) while TCP/held XY is over the place region → force open_gripper (log place_force_release); avoid endless lift↔lower thrash over basket.
 Freshness/isolation: each async slow-think job has a unique job_id + private result_box (abandoned workers cannot overwrite a newer job); after keypoint refresh, close is blocked until TCP re-approaches the new grasp XY; recovery mutations recompute namespace/facts before execute and spectator.
+Jev recovery menu (default off, JEV_RECOVERY_MENU): rules = hand-written stall_feedback / approach_change rules and _choose_stall_feedback, recovery intents hidden. jev = those five actions are on the discrete menu and those auto-rules are skipped so they cannot force the same decision. both = menu on and the auto-rules still run first. Explicit Codex plan steps still apply in every mode. Identity-deadlock escape and the local-deadend cap stay on in every mode. confirm_contact is not a menu intent. See libero_rsi/jev_recovery_menu.py and README.
 """
 import os, sys, json, time, gc, re, threading, queue
 os.environ.setdefault('MUJOCO_GL', 'egl'); os.environ.setdefault('PYOPENGL_PLATFORM', 'egl')
@@ -45,6 +46,7 @@ except ModuleNotFoundError as ex:
 import dsl_libero as dsl
 from validate import validate
 import jev_experience as JX
+import jev_recovery_menu as JRM
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 from robosuite.utils import camera_utils as CU
@@ -75,6 +77,10 @@ validate(LIB)  # Reject invalid libraries before creating a simulator or making 
 ASK_ASTRA_NAMES = frozenset({'ask_astra', 'consult_astra'})
 GATE_JEV = os.environ.get('GATE_JEV', '1') != '0'  # spectator Jev gate (旁观者清); 0 disables
 GATE_JEV_COOLDOWN = int(os.environ.get('GATE_JEV_COOLDOWN', '3'))  # min decisions between spectator Jev calls
+# rules (default) | jev (menu on, auto stall rules off) | both (menu on, auto stall rules still first)
+JEV_RECOVERY_MODE, _JEV_RECOVERY_MODE_WARN = JRM.parse_mode(os.environ.get('JEV_RECOVERY_MENU'))
+if _JEV_RECOVERY_MODE_WARN:
+    print(_JEV_RECOVERY_MODE_WARN, file=sys.stderr)
 def _ensure_ask_astra_intents(lib):
     """Inject ask_astra / consult_astra into any library so Jev can request Codex planning help."""
     names = {i['name'] for i in lib.get('intents', [])}
@@ -99,10 +105,16 @@ def _ensure_ask_astra_intents(lib):
     if 'ask_astra' not in instr:
         lib['intent_instructions'] = instr + tip
 _ensure_ask_astra_intents(LIB)
+if JRM.menu_enabled(JEV_RECOVERY_MODE):
+    # In-memory only. rules mode does not inject, and choice-time filtering hides
+    # recovery intents that a library file already lists.
+    JRM.ensure_recovery_intents(LIB)
+    validate(LIB)
 ep_dir = os.path.join(OUT, f'{suite}_t{tid}_i{init_i}'); os.makedirs(ep_dir, exist_ok=True)
 logf = open(os.path.join(ep_dir, 'decisions.jsonl'), 'w')
 def log(**k): logf.write(json.dumps(k, default=lambda o: np.asarray(o).round(4).tolist()) + '\n'); logf.flush()
-META = {'bench': 'libero', 'suite': suite, 'task': tid, 'init': init_i, 'mode': 'rsi_adapter_v2_shape_fbpatch', 'lib': LIB.get('version')}
+META = {'bench': 'libero', 'suite': suite, 'task': tid, 'init': init_i, 'mode': 'rsi_adapter_v2_shape_fbpatch', 'lib': LIB.get('version'),
+        'recovery_menu': JEV_RECOVERY_MODE}
 
 b = benchmark.get_benchmark_dict()[suite](); task = b.get_task(tid); LANG = task.language
 def make_env():
@@ -482,7 +494,8 @@ EP = {'closed': False, 'n_same': 0, 'prev': 'none', 'step': 0, 'ever_contact': F
       'last_local_deadend_reason': None, 'grasp_secured_once': False, 'in_local_deadend': False,
       'grasp_confirm': False, 'grasp_confirm_detail': None,
       'place_carry_reached_once': False, 'place_lower_stall_n': 0, 'place_lift_lower_cycles': 0,
-      'place_cycle_armed': False, 'place_force_release': False, 'place_force_release_reason': None}
+      'place_cycle_armed': False, 'place_force_release': False, 'place_force_release_reason': None,
+      'recovery_outcomes': []}
 # After a keypoint refresh that moves the target away from the current TCP, block close until re-approach.
 REAPPROACH_XY_M = float(os.environ.get('REAPPROACH_XY_M', '0.03'))
 
@@ -662,7 +675,10 @@ def facts(ns, preds):
          'times_closed': ns['n_close'], 'released_since_close': ns['released'], 'astra_says_object_held': ns['seen_held'],
          'grasp_point_estimate_m': r3(ns['grasp']), 'object_top_centre_estimate_m': r3(ns['objc']), 'place_point_estimate_m': r3(ns['place']),
          'object_height_estimate_m': round(ns['obj_h'], 3), 'previous_intent': ns['prev'], 'decisions_in_previous_intent': ns['n_same'], 'last_intent_result': ns.get('last_result', 'none')}
-    f.update(preds); return f
+    f.update(preds)
+    # Menu modes only. rules leaves the fact keys unchanged.
+    f.update(JRM.facts_extra(JEV_RECOVERY_MODE, EP, push_cap=MAX_PUSH_ASIDE, push_approach_cap=MAX_PUSH_ASIDE_PER_APPROACH))
+    return f
 
 def servo(target, grip, gain=1.0, max_steps=60, tol=.006):
     last = eef(); stall = 0
@@ -1350,6 +1366,14 @@ def _execute_push_aside(ns, reason='stall', plan_step=None, dep=None):
     detail['grasp_dz_objh'] = PATCH['grasp_dz_objh']
     return detail
 
+def _note_jev_recovery_outcome(requested, detail):
+    """Append one outcome line when the recovery menu is on. Rules mode leaves EP unchanged."""
+    if not JRM.menu_enabled(JEV_RECOVERY_MODE):
+        return None
+    text = JRM.format_recovery_outcome(requested, detail, force_next=EP.get('force_next_intent'))
+    JRM.remember(EP, text)
+    return text
+
 def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
     """Multi-action stall feedback (raise/redescend, lateral re-center, relative yaw, confirm contact, clear/reapproach, push_aside).
     Observation-driven; no hard-coded object names or fixed scene angles.
@@ -1368,7 +1392,7 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
     if EP.get('grasp_confirm') or (EP.get('grasp_secured_once') and EP.get('closed') and _grasp_secured_now(ns)):
         lift_name = 'lift' if 'lift' in {i['name'] for i in LIB.get('intents', [])} else 'move_above_object'
         EP['force_next_intent'] = lift_name
-        return {
+        out = {
             'action': 'skip_secured_grasp',
             'reason': reason,
             'stall_feedback_n': int(EP.get('stall_feedbacks', 0)),
@@ -1376,6 +1400,8 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
             'force_next': lift_name,
             'pending_suppressed': action,
         }
+        _note_jev_recovery_outcome(action, out)
+        return out
     # Hard local-deadend gate (skip while already inside deadend recovery to avoid recursion)
     if not EP.get('in_local_deadend'):
         fire, why = _local_deadend_should_trigger(pending_action=action)
@@ -1385,7 +1411,7 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
                 dd = _local_deadend_global_relook_sync_slow(why or 'local_deadend', ns=ns)
             finally:
                 EP['in_local_deadend'] = False
-            return {
+            out = {
                 'action': 'local_deadend_global_relook',
                 'reason': reason,
                 'stall_feedback_n': int(EP.get('stall_feedbacks', 0)),
@@ -1396,6 +1422,8 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
                     'relook_matched': ((dd or {}).get('relook') or {}).get('matched'),
                 },
             }
+            _note_jev_recovery_outcome(action, out)
+            return out
     EP['stall_feedbacks'] = int(EP.get('stall_feedbacks', 0)) + 1
     detail = {'action': action, 'reason': reason, 'stall_feedback_n': EP['stall_feedbacks']}
     l = bool(ns.get('left_contact')); r = bool(ns.get('right_contact')); both = bool(ns.get('contact'))
@@ -1508,7 +1536,9 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
             detail['local_deadend_global_relook'] = True
             detail['deadend_reason'] = why2
             detail['deadend_slow_result'] = (dd or {}).get('slow_result')
+            _note_jev_recovery_outcome(action, detail)
             return detail
+    _note_jev_recovery_outcome(action, detail)
     return detail
 
 def _escape_look(reason):
@@ -1551,7 +1581,9 @@ def _escape_identity_deadlock(reason):
         EP['force_next_intent'] = 'retreat' if 'retreat' in {i['name'] for i in LIB['intents']} else 'move_above_object'
         log(t=T[0], identity_escape='raise_only_cap', **detail)
         return 'identity_escape_cap'
-    ch = _apply_stall_feedback(ns, reason)  # multi-action (not yaw-only)
+    # Safety rail in every JEV_RECOVERY_MENU mode: identity deadlock still uses the
+    # hand-written chooser so the arm cannot freeze after the relook budget is gone.
+    ch = _apply_stall_feedback(ns, reason)
     detail['stall_feedback'] = ch
     lr = _escape_look(reason)
     detail['escape_look'] = lr
@@ -1631,11 +1663,42 @@ def do_relook(reason):
         return 'relooked_matched' if matched else 'relooked_unmatched'
     except Exception as e: return 'relook_error'
 
+def _execute_jev_recovery(action, ns):
+    """Run one menu recovery and return the outcome line Jev will see as last_intent_result."""
+    if not JRM.menu_enabled(JEV_RECOVERY_MODE):
+        text = f'{action}:refused:recovery_menu_disabled'
+        JRM.remember(EP, text)
+        return text
+    try:
+        ns_fb, _ = namespace()
+    except Exception:
+        ns_fb = ns or {}
+    n_before = len(EP.get('recovery_outcomes') or [])
+    detail = _apply_stall_feedback(ns_fb, f'jev_menu:{action}', action=action)
+    hist = EP.get('recovery_outcomes') or []
+    if len(hist) > n_before:
+        text = hist[-1]
+    else:
+        text = JRM.format_recovery_outcome(action, detail, force_next=EP.get('force_next_intent'))
+        JRM.remember(EP, text)
+    try:
+        log(t=T[0], jev_recovery=True, requested=action, outcome=text,
+            actual=(detail or {}).get('action'), error=(detail or {}).get('error'))
+    except Exception:
+        pass
+    return text
+
+def _jev_instr(extra=''):
+    return JX.jev_choose_instructions(
+        LIB, extra=JRM.join_extra(extra, JRM.instruction_extra(JEV_RECOVERY_MODE)))
+
 def execute(name, ns):
     it = {i['name']: i for i in LIB['intents']}[name]
     act = it.get('action', 'move'); fing = it.get('fingers', 'keep')
     if act in ASK_ASTRA_NAMES or name in ASK_ASTRA_NAMES:
         return do_ask_astra(f'jev_intent:{name}')
+    if act in JRM.RECOVERY_ACTIONS or name in JRM.RECOVERY_ACTIONS:
+        return _execute_jev_recovery(name if name in JRM.RECOVERY_ACTIONS else act, ns)
     if act == 'relook': return do_relook('library rule chose relook')
     if act == 'finish': return 'finish'
     if fing == 'close' and not EP['closed']:
@@ -1840,7 +1903,10 @@ def _apply_episode_plan(p, dep, source='slow'):
             done_steps.append(f"relook:{do_relook(f'{source}:plan')}")
             return done_steps
     # Stall + identity confirmed ⇒ shared target MUST change (raise/shift/relook-refresh). Empty relook-only forbidden.
-    if id_ok and stallish and not target_updated:
+    # jev mode skips this chooser (same predicate as JRM.rules_auto_choose_enabled) so Jev picks the recovery.
+    # Explicit plan steps above still ran. Smoke exec of this function has no mode global and keeps rules.
+    _recovery_mode = globals().get('JEV_RECOVERY_MODE', 'rules')
+    if id_ok and stallish and not target_updated and _recovery_mode != 'jev':
         try:
             ns_fb, _ = namespace()
             det = _apply_stall_feedback(ns_fb, f'{source}:forced_target_update')
@@ -1859,7 +1925,9 @@ def _run_episode_start_plan():
     mode = 'codex'
     out = {'mode': mode, 'applied': False, 'plan_done': [], 'error': None}
     try:
-        brief = JX.build_jev_experience_brief(LIB, facts={}, ns={}, uses=EP.get('uses') or {}, dsl=dsl)
+        brief = JX.build_jev_experience_brief(
+            LIB, facts={}, ns={}, uses=EP.get('uses') or {}, dsl=dsl,
+            recovery_menu=globals().get('JEV_RECOVERY_MODE', 'rules'))
     except Exception:
         brief = {}
     # Seed general start priors into the brief the planner sees (not task/brand hardcodes).
@@ -2111,7 +2179,8 @@ def _prepare_slow_snapshot(ctx, crit, phase, both, image_tag):
     ns, preds = namespace()
     brief = JX.build_jev_experience_brief(
         LIB, facts=facts(ns, preds), ns=ns, uses=EP.get('uses') or {}, dsl=dsl,
-        episode_lessons=FB_LESSONS, episode_start_plan=EP.get('start_plan'))
+        episode_lessons=FB_LESSONS, episode_start_plan=EP.get('start_plan'),
+        recovery_menu=globals().get('JEV_RECOVERY_MODE', 'rules'))
     # Unique image and detached policy context belong to this request.
     frame = os.path.join(ep_dir, f'slow_input_{image_tag}.jpg')
     Image.fromarray(both).save(frame)
@@ -2431,6 +2500,7 @@ def _spectator_jev_state(intent, result, signals, ns, facts):
     brief = JX.build_jev_experience_brief(
         LIB, facts=facts, ns=ns, uses=EP.get('uses'), episode_lessons=FB_LESSONS, dsl=dsl,
         max_recoveries=4, max_lessons=3, max_active=2,
+        recovery_menu=globals().get('JEV_RECOVERY_MODE', 'rules'),
     )
     return {
         'role': 'spectator_gate',
@@ -2613,12 +2683,15 @@ except Exception as _sp_ex:
         pass
 
 t0 = time.time(); res = {'suite': suite, 'task_id': tid, 'init': init_i, 'language': LANG, 'library': LIBP, 'library_version': LIB.get('version'),
-                         'fallback': FALLBACK, 'perception0': per0, 'start_plan': START_PLAN_OUT}
+                         'fallback': FALLBACK, 'perception0': per0, 'start_plan': START_PLAN_OUT,
+                         'recovery_menu': JEV_RECOVERY_MODE}
 end = 'horizon'; jev_calls = 0; fb_events = []; slow_events = []
 try:
     if START_PLAN_OUT.get('error'):
         raise RuntimeError(f"episode_start_plan_failed:{START_PLAN_OUT['error']}")
     intents = {i['name']: i for i in LIB['intents']}
+    # rules hides recovery intents even if the loaded library lists them.
+    choice_menu = {i['name']: i for i in JRM.acting_intents(LIB['intents'], JEV_RECOVERY_MODE)}
     while T[0] < HORIZON and not DONE[0] and dec < MAX_DEC:
         trig = fb_trigger()
         if trig:  # early perception-and-Codex recovery: episode-only re-perception (never edits the library)
@@ -2637,6 +2710,11 @@ try:
                 uses = EP['uses'].get(rc['id'], 0)
                 max_u = int(rc.get('max_uses', 3 if 'force_intent' in rc else 1))
                 if not trig_ok or uses >= max_u:
+                    continue
+                # jev: Jev owns stall_feedback / approach_change, so the rule must not
+                # move the arm or force the next intent. rules and both still fire it
+                # before JC.choose. Place-release and other force_intent rules still run.
+                if JRM.recovery_rule_skipped(rc, JEV_RECOVERY_MODE):
                     continue
                 # Fire once: optional multi-action stall feedback / approach change + shape + force_intent.
                 EP['uses'][rc['id']] = uses + 1
@@ -2691,16 +2769,16 @@ try:
                 pass
         # Deadlock guard: if identity unconfirmed and relook budget gone, never ask Jev for close_gripper.
         if forced is None and (not goal_id_confirmed()) and P['relook'] >= MAX_RELOOK:
-            menu = {k: v for k, v in intents.items() if k != 'close_gripper'}
-            if not menu: menu = intents
-            it, probs, _ = JC.choose(JX.jev_choose_state(LANG, f, LIB, ns=ns, uses=EP.get('uses'), episode_lessons=FB_LESSONS, episode_start_plan=EP.get('start_plan'), dsl=dsl),
-                                     JX.jev_choose_instructions(LIB, extra='Do NOT select close_gripper until goal identity is confirmed; prefer ask_astra, relook, move_above_object, or reopen_and_retry.'),
+            menu = {k: v for k, v in choice_menu.items() if k != 'close_gripper'}
+            if not menu: menu = choice_menu or intents
+            it, probs, _ = JC.choose(JX.jev_choose_state(LANG, f, LIB, ns=ns, uses=EP.get('uses'), episode_lessons=FB_LESSONS, episode_start_plan=EP.get('start_plan'), dsl=dsl, recovery_menu=JEV_RECOVERY_MODE),
+                                     _jev_instr('Do NOT select close_gripper until goal identity is confirmed; prefer ask_astra, relook, move_above_object, or reopen_and_retry.'),
                                      {k: v['definition'] for k, v in menu.items()}, meta=META); jev_calls += 1
         elif forced: it, probs = forced, None
         else:
-            it, probs, _ = JC.choose(JX.jev_choose_state(LANG, f, LIB, ns=ns, uses=EP.get('uses'), episode_lessons=FB_LESSONS, episode_start_plan=EP.get('start_plan'), dsl=dsl),
-                                     JX.jev_choose_instructions(LIB),
-                                     {k: v['definition'] for k, v in intents.items()}, meta=META); jev_calls += 1
+            it, probs, _ = JC.choose(JX.jev_choose_state(LANG, f, LIB, ns=ns, uses=EP.get('uses'), episode_lessons=FB_LESSONS, episode_start_plan=EP.get('start_plan'), dsl=dsl, recovery_menu=JEV_RECOVERY_MODE),
+                                     _jev_instr(),
+                                     {k: v['definition'] for k, v in choice_menu.items()}, meta=META); jev_calls += 1
         CUR['intent'] = it; r = execute(it, ns); dec += 1
         EP['last_result'] = r
         EP['n_same'] = EP['n_same'] + 1 if it == EP['prev'] else 1; EP['prev'] = it; EP['step'] += 1
@@ -2788,9 +2866,17 @@ res.update(success=bool(DONE[0]), end_reason=end, env_steps=T[0], decisions=dec,
            place_force_release=bool(EP.get('place_force_release')),
            place_force_release_reason=EP.get('place_force_release_reason'),
            place_lower_stall_n=int(EP.get('place_lower_stall_n', 0)),
-           place_lift_lower_cycles=int(EP.get('place_lift_lower_cycles', 0)))
+           place_lift_lower_cycles=int(EP.get('place_lift_lower_cycles', 0)),
+           recovery_menu=JEV_RECOVERY_MODE,
+           recovery_outcomes=list(EP.get('recovery_outcomes') or []),
+           push_aside_n=int(EP.get('push_aside_n', 0)),
+           clear_reapproach_n=int(EP.get('clear_reapproach_n', 0)),
+           stall_feedback_count=int(EP.get('stall_feedbacks', 0)))
 json.dump(res, open(os.path.join(ep_dir, 'result.json'), 'w'), indent=1, default=lambda o: np.asarray(o).tolist())
-print(json.dumps({k: res[k] for k in ('suite', 'task_id', 'init', 'success', 'end_reason', 'env_steps', 'decisions', 'astra_cost_usd', 'slow_interventions', 'close_refusals', 'wall_s') if k in res}))
+print(json.dumps({k: res[k] for k in (
+    'suite', 'task_id', 'init', 'success', 'end_reason', 'env_steps', 'decisions',
+    'jev_calls', 'astra_calls', 'planning_calls', 'recovery_menu',
+    'astra_cost_usd', 'slow_interventions', 'close_refusals', 'wall_s') if k in res}))
 if VID: VID.stdin.close(); VID.wait()
 try: env.close()  # explicit EGL teardown (avoid __del__ EGLError at interpreter exit)
 except Exception: pass

@@ -39,6 +39,47 @@ After `close_gripper`, `_confirm_grasp_after_close` checks proprio (opening and 
 
 During place, consecutive `lower_to_place` stalls (`MAX_PLACE_LOWER_STALL`, default 3) or lift↔lower cycles (`MAX_PLACE_LIFT_LOWER_CYCLES`, default 2), while the held object is near the place XY, set `place_force_release` and force `open_gripper`.
 
+## Jev recovery menu (default off)
+
+`raise_redescend`, `lateral_recenter`, `change_approach_yaw`, `clear_reapproach`, and `push_aside` are stall recoveries. With `JEV_RECOVERY_MENU` unset they stay inside hand-written rules: library `stall_feedback` / `approach_change` triggers and `_choose_stall_feedback`. Jev does not see them as intents. Existing libraries, including `libs/ee_pg_lib_frozen.json` and `libs/ee_pg_easy_v2_lib.json`, are unchanged.
+
+Set the flag to put those five actions on Jev's discrete menu. Definitions live in `libs/ee_pg_easy_v2_lib_jev_recovery.json`. If that file is not the one you pass, `jev` and `both` inject the same intents in memory. `confirm_contact` stays off the menu.
+
+| `JEV_RECOVERY_MENU` | Menu | Automatic stall rules |
+|---|---|---|
+| unset, `rules`, `0`, `off` | hidden, even if the library lists the five intents | on (`stall_feedback`, `approach_change`, and the empty-plan chooser) |
+| `jev`, `1`, `on` | Jev selects the five actions | off, so a rule cannot move the arm or force the next intent on that decision |
+| `both` | Jev selects the five actions | on, and a matching rule runs before `JC.choose` |
+
+Unknown values warn and stay on `rules`.
+
+In `jev`, place-release and other `force_intent` rules still run. Explicit Codex plan steps still run. Two safety rails stay on in every mode: identity-deadlock escape (relook budget exhausted) and the local-deadend cap. Both can still call the chooser so the arm cannot freeze. `push_aside` itself still refuses an unconfirmed identity, a secured grasp, or a push cap; the refusal is the action outcome.
+
+In `both`, a firing stall rule consumes the decision and queues its follow-up (usually `move_above_object`) before Jev chooses. Jev only picks a recovery on decisions those rules do not take.
+
+Passing `ee_pg_easy_v2_lib_jev_recovery.json` with the flag unset does not enable the menu: the extra intents are filtered out of `JC.choose` and the stall rules stay on. Set the flag when you use that file. Its instruction text mentions the five actions either way.
+
+When the menu is on, `observed_facts` gains `recovery_menu`, `last_recovery_outcome`, `recent_recovery_outcomes` (last five), `clear_reapproach_count`, `push_aside_count`, `push_aside_approach_count`, `push_aside_capped`, `need_reapproach`, `stall_feedback_count`, and `last_stall_issue`. Rules mode does not add these keys. Each menu action's `execute` result is the same outcome line (`push_aside:ok:pushed:...`, `push_aside:refused:...`, `raise_redescend:ok:raised_and_shallowed`, and the same shape for the other three). Rule-fired and Codex-fired recoveries are appended to that history too, so a later choice can see them. A recovery still queues `move_above_object` (or lift, when a grasp is secured) as the next forced intent; that follow-up does not spend a Jev call. The outcome line ends with `next_<intent>`.
+
+`result.json` records `recovery_menu`, `recovery_outcomes`, `push_aside_n`, `clear_reapproach_n`, `stall_feedback_count`, plus the existing `success`, `jev_calls`, `astra_calls`, `planning_calls`, and `gate_jev_calls`.
+
+Suggested ablation, same suite, task, and init seeds:
+
+```bash
+# rules — current behavior
+python libero_rsi/run_ep_fbpatch.py SUITE TID INIT libero_rsi/libs/ee_pg_easy_v2_lib.json OUT/rules
+
+# jev — model picks the recovery, stall rules off
+JEV_RECOVERY_MENU=jev python libero_rsi/run_ep_fbpatch.py SUITE TID INIT \
+  libero_rsi/libs/ee_pg_easy_v2_lib_jev_recovery.json OUT/jev
+
+# both — menu on, stall rules still preempt
+JEV_RECOVERY_MENU=both python libero_rsi/run_ep_fbpatch.py SUITE TID INIT \
+  libero_rsi/libs/ee_pg_easy_v2_lib_jev_recovery.json OUT/both
+```
+
+Per episode, record official success (score), the init seed, and `jev_calls`, `astra_calls`, `planning_calls`, `gate_jev_calls`. SR is the mean of `success` over seeds. Compare `recovery_outcomes` and `stall_feedback_count` when a stall rule fired before Jev could choose.
+
 ## Fixed model roles
 
 | Role | Model | Invocation |

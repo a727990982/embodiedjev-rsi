@@ -33,6 +33,7 @@ For early recovery the harness abandons pending advice, refreshes keypoints/iden
 - RGB-D perception: image keypoints backprojected through the camera calibration and depth; language-target identity assertions from perception/verification.
 - Official binary success, which terminates the episode.
 - Library predicates, recoveries and qualitative lessons, plus episode-local corrections.
+- Recovery-menu facts, only when `JEV_RECOVERY_MENU` is `jev` or `both`: `last_recovery_outcome`, `recent_recovery_outcomes`, push/clear counters, `push_aside_capped`, `need_reapproach`, `stall_feedback_count`, and `last_stall_issue`. Rules mode (the default) does not add these keys. See the README section "Jev recovery menu".
 
 The start planner cannot elevate the identity gate. An unverified target queues `relook`; planning statements such as “blocked by neighbour” do not authorize closing or pushing.
 

@@ -49,7 +49,11 @@ def _recovery_hint(rc: dict) -> str:
     return '; '.join(bits) if bits else ''
 
 
-def _recovery_line(rc: dict, uses: dict) -> dict:
+def _auto_stall_recovery(rc: dict) -> bool:
+    return bool((rc or {}).get('stall_feedback') or (rc or {}).get('approach_change'))
+
+
+def _recovery_line(rc: dict, uses: dict, recovery_menu: str = 'rules') -> dict:
     uid = rc.get('id', '')
     max_u = int(rc.get('max_uses', 3 if 'force_intent' in rc else 1))
     used = int((uses or {}).get(uid, 0))
@@ -63,6 +67,23 @@ def _recovery_line(rc: dict, uses: dict) -> dict:
     h = _recovery_hint(rc)
     if h:
         line['hint'] = h
+    # rules: leave the line unchanged. jev/both only annotate auto stall rules.
+    if recovery_menu == 'rules' or not _auto_stall_recovery(rc):
+        return line
+    if recovery_menu == 'jev':
+        line['auto'] = False
+        sf = rc.get('stall_feedback')
+        if isinstance(sf, str):
+            line['prefer'] = sf
+        elif rc.get('approach_change'):
+            line['prefer'] = 'change_approach_yaw'
+        else:
+            line['prefer'] = None
+        line['hint'] = 'automatic stall rule is off; select a recovery intent yourself'
+    elif recovery_menu == 'both':
+        line['auto'] = True
+        extra = 'automatic rule may run before your choice'
+        line['hint'] = (line['hint'] + '; ' + extra) if line.get('hint') else extra
     return line
 
 
@@ -124,6 +145,7 @@ def build_jev_experience_brief(
     max_recoveries: int = 6,
     max_lessons: int = 5,
     max_active: int = 3,
+    recovery_menu: str = 'rules',
 ) -> Dict[str, Any]:
     """Build a compact experience_brief for JC.choose state.
 
@@ -132,6 +154,8 @@ def build_jev_experience_brief(
     - lessons: relevant when→instead (scored against current facts), not full library prose
     - episode_reflections: in-episode fallback lessons, if any (short)
     - episode_start_plan: Great Wall start prior (step1_must / phase_order / risks); follow unless contradicted
+    - recovery_menu: ``rules`` (default) leaves this brief unchanged. ``jev`` marks automatic
+      stall rules as off. ``both`` marks that those rules may still run before the choice.
     """
     facts = facts or {}
     uses = uses or {}
@@ -140,7 +164,7 @@ def build_jev_experience_brief(
     active: List[dict] = []
     catalog: List[dict] = []
     for rc in lib.get('recoveries', []) or []:
-        line = _recovery_line(rc, uses)
+        line = _recovery_line(rc, uses, recovery_menu=recovery_menu)
         catalog.append(line)
         if ns is not None and dsl is not None and line['uses_left'] > 0:
             try:
@@ -195,6 +219,15 @@ def build_jev_experience_brief(
             'issue': episode_start_plan.get('issue'),
             'plan': list(episode_start_plan.get('plan') or [])[:3],
         }
+    if recovery_menu == 'jev':
+        brief['note'] += (
+            ' Automatic stall-feedback rules are off. Choose raise_redescend, lateral_recenter, '
+            'change_approach_yaw, clear_reapproach, or push_aside, and read recent_recovery_outcomes.'
+        )
+    elif recovery_menu == 'both':
+        brief['note'] += (
+            ' Recovery intents are available. Automatic stall-feedback rules still run first when their trigger matches.'
+        )
     return brief
 
 
@@ -207,6 +240,7 @@ def jev_choose_state(
     episode_lessons=None,
     episode_start_plan=None,
     dsl=None,
+    recovery_menu: str = 'rules',
 ) -> dict:
     """Full JC.choose state dict including experience_brief."""
     return {
@@ -219,6 +253,7 @@ def jev_choose_state(
             lib, facts=facts, ns=ns, uses=uses,
             episode_lessons=episode_lessons,
             episode_start_plan=episode_start_plan, dsl=dsl,
+            recovery_menu=recovery_menu,
         ),
     }
 
