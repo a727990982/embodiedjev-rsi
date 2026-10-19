@@ -209,6 +209,7 @@ class HarnessTests(unittest.TestCase):
         commands = []
         ep = {'closed': True, 'grasp_confirm': True, 'grasp_secured_once': True}
         scope = functions('execute', LIB=lib, ASK_ASTRA_NAMES={'ask_astra', 'consult_astra'},
+            TRANSPORT_INTENTS={'lift', 'carry_to_place', 'lower_to_place'},
             EP=ep, PER={'seen_held': True}, DONE=[False],
             grip=lambda *args: commands.append(args))
         self.assertEqual(scope['execute']('reopen_and_retry', {}), 'reopened')

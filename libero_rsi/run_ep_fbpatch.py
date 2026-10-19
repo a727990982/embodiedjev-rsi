@@ -59,7 +59,10 @@ PLACE_CLEARANCE_DEFAULT = float(os.environ.get('PLACE_CLEARANCE_DEFAULT', '0.05'
 ASTRA_EFFORT = os.environ.get('ASTRA_EFFORT', 'xhigh')  # Astra perception/identity effort through Codex CLI
 SLOW_MIN_GAP_S = float(os.environ.get('SLOW_MIN_GAP_S', '5'))  # gap between completed Codex planning calls (unless critical)
 STAGE_FAIL_N = int(os.environ.get('STAGE_FAIL_N', '3'))  # consecutive timeout/stall + unchanged gripper -> sync slow-think
-FAIL_RESULTS = frozenset({'timeout', 'stalled'})
+TRANSPORT_INTENTS = frozenset({'lift', 'carry_to_place', 'lower_to_place'})
+GRASP_FAILED = 'grasp_failed:transport_not_executed'
+FAIL_RESULTS = frozenset({'timeout', 'stalled', GRASP_FAILED} |
+                         {f'{name}_not_executed:grasp_unconfirmed' for name in TRANSPORT_INTENTS})
 OPEN_MAX = 0.08  # Panda gripper spec (robot spec, not scene)
 LIB = json.load(open(LIBP))
 validate(LIB)  # Reject invalid libraries before creating a simulator or making model calls.
@@ -126,18 +129,23 @@ def diag():  # DIAGNOSTIC ONLY (never shown to policy): per-step BDDL goal predi
     if DIAGF: DIAGF.write(json.dumps(out) + '\n'); DIAGF.flush()
 # always snapshot start poses for end-of-episode moved_most (diagnostic only)
 diag()
-VIDP = os.environ.get('VIDEO'); VID = None; CUR = {'intent': '-', 'fb': '', 'fb_t': -999, 'slow': '', 'slow_t': -999}
-if VIDP:
+def _start_video(path):
     import subprocess
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    return subprocess.Popen(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '1024x572', '-r', '20', '-i', '-',
+                             '-c:v', 'libx264', '-threads', '1', '-pix_fmt', 'yuv420p', '-crf', '26', '-preset', 'medium', '-movflags', '+faststart', path], stdin=subprocess.PIPE)
+
+
+VIDP = os.environ.get('VIDEO', os.path.join(ep_dir, 'episode.mp4')); VID = None; CUR = {'intent': '-', 'fb': '', 'fb_t': -999, 'slow': '', 'slow_t': -999}
+if VIDP:
     from PIL import Image as _I, ImageDraw as _D
-    VID = subprocess.Popen(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '1024x572', '-r', '20', '-i', '-',
-                            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '26', '-preset', 'medium', '-movflags', '+faststart', VIDP], stdin=subprocess.PIPE)
+    VID = _start_video(VIDP)
 def vid_frame(a):
     im = _I.new('RGB', (1024, 572)); im.paste(_I.fromarray(obs['agentview_image'][::-1]), (0, 0))
     if 'robot0_eye_in_hand_image' in obs: im.paste(_I.fromarray(obs['robot0_eye_in_hand_image'][::-1]).resize((512, 512)), (512, 0))
     d = _D.Draw(im); g = 'CLOSED' if a[6] > 0 else 'OPEN'
     op = float(obs['robot0_gripper_qpos'][0] - obs['robot0_gripper_qpos'][1])
-    d.text((6, 516), f"step {T[0]}/600   intent: {CUR['intent']}   gripper cmd: {g}  opening {op*100:.1f}cm   {'SUCCESS' if DONE[0] else ''}", fill=(255, 255, 0))
+    d.text((6, 516), f"step {T[0]}/{HORIZON}   intent: {CUR['intent']}   gripper cmd: {g}  opening {op*100:.1f}cm   {'SUCCESS' if DONE[0] else ''}", fill=(255, 255, 0))
     if T[0] - CUR['fb_t'] < 60: d.text((6, 536), f"FALLBACK: {CUR['fb']}"[:170], fill=(255, 80, 80))
     elif T[0] - CUR['slow_t'] < 60: d.text((6, 536), f"SLOW: {CUR['slow']}"[:170], fill=(80, 200, 255))
     d.text((6, 554), 'left: agentview   right: wrist cam', fill=(180, 180, 180))
@@ -825,6 +833,21 @@ LOCAL_LOOP_FAMILY = frozenset({
     'push_aside', 'clear_reapproach', 'raise_redescend', 'lateral_recenter',
 })
 # Same-family local thrash without progress → force retreat + global front relook + sync slow replan.
+
+def _transport_grasp_ready():
+    """Confirmed target grasp with current sensor support, not a historical latch."""
+    if not (EP.get('closed') and EP.get('grasp_confirm') and goal_id_confirmed()):
+        return False
+    left, right = contacts()
+    return bool((left and right) or ((left or right) and opening() >= 0.10 * OPEN_MAX))
+
+
+def _acting_menu(intents):
+    ready = _transport_grasp_ready()
+    return {name: intent for name, intent in intents.items()
+            if (name != 'close_gripper' or goal_id_confirmed())
+            and (name not in TRANSPORT_INTENTS or ready)}
+
 
 def _grasp_secured_now(ns=None):
     """Policy-visible: confirmed grasp, or bilateral contact + closed (+ optional seen_held)."""
@@ -1730,8 +1753,18 @@ def execute(name, ns):
     if act == 'finish':
         EP['todo_review_due'] = 'finish_requested'
         return 'finish' if DONE[0] else 'skip_finish'
+    if name in TRANSPORT_INTENTS and not _transport_grasp_ready():
+        EP['grasp_confirm'] = False
+        EP['grasp_secured_once'] = False
+        PER['seen_held'] = False
+        return f'{name}_not_executed:grasp_unconfirmed'
     if name == 'close_gripper' and EP['closed']:
-        return 'already_closed'
+        if _transport_grasp_ready():
+            return 'already_closed'
+        EP['grasp_confirm'] = False
+        EP['grasp_secured_once'] = False
+        PER['seen_held'] = False
+        return GRASP_FAILED
     if fing == 'close' and not EP['closed']:
         # HARD GATE: null/false/unsure goal identity ⇒ force relook, refuse close until matched. Uncertain ≠ proceed.
         # When relook budget is exhausted, DO NOT freeze: raise + relative approach change + escape look.
@@ -1774,9 +1807,15 @@ def execute(name, ns):
         EP['closes'].append({'xyz': [round(float(x), 3) for x in eef()], 'opening_after_close': round(opening(), 4),
                              'both_contact': all(contacts()), 'goal_id_confirmed': True})
         try:
-            _confirm_grasp_after_close()
-        except Exception:
-            pass
+            secured, detail = _confirm_grasp_after_close()
+        except Exception as exc:
+            secured = False
+            log(t=T[0], grasp_confirmation_error=True, error_type=type(exc).__name__)
+        if not secured:
+            EP['grasp_confirm'] = False
+            EP['grasp_secured_once'] = False
+            PER['seen_held'] = False
+            return GRASP_FAILED
         return 'closed'
     if fing == 'open' and EP['closed']:
         EP['closed'] = False; grip(-1, 15); EP['released'] = True; EP['just_released'] = True
@@ -2766,8 +2805,7 @@ try:
             it, probs = forced, None
         else:
             state, assets = _jev_input(include_execution_history=True)
-            menu = {k: v for k, v in intents.items()
-                    if k != 'close_gripper' or goal_id_confirmed()}
+            menu = _acting_menu(intents)
             it, probs, _ = JC.choose(state, JO.INSTRUCTIONS,
                                      JO.candidate_definitions(menu), assets=assets, meta=META)
             jev_calls += 1
@@ -2865,9 +2903,16 @@ res.update(success=bool(DONE[0]), end_reason=end, env_steps=T[0], decisions=dec,
            place_force_release_reason=EP.get('place_force_release_reason'),
            place_lower_stall_n=int(EP.get('place_lower_stall_n', 0)),
            place_lift_lower_cycles=int(EP.get('place_lift_lower_cycles', 0)))
+if VID:
+    try:
+        VID.stdin.close()
+    except BrokenPipeError:
+        pass
+    video_rc = VID.wait()
+    res['video_path'] = VIDP
+    res['video_exit_code'] = video_rc
 json.dump(res, open(os.path.join(ep_dir, 'result.json'), 'w'), indent=1, default=lambda o: np.asarray(o).tolist())
 print(json.dumps({k: res[k] for k in ('suite', 'task_id', 'init', 'success', 'end_reason', 'env_steps', 'decisions', 'astra_cost_usd', 'slow_interventions', 'close_refusals', 'wall_s') if k in res}))
-if VID: VID.stdin.close(); VID.wait()
 try: env.close()  # explicit EGL teardown (avoid __del__ EGLError at interpreter exit)
 except Exception: pass
 sys.stdout.flush(); logf.close(); os._exit(1 if end == 'harness_error' else 0)

@@ -79,6 +79,7 @@ def fake_run(destination, fail_start=False):
         assert kwargs.get('assets'), 'Jev must receive real image assets'
         assert 'task_todo' in state and 'proprioception' in state
         assert 'observed_facts' not in state and 'experience_brief' not in state
+        assert not {'lift', 'carry_to_place', 'lower_to_place'} & set(criteria), 'Empty hand must not be offered transport'
         history = state['execution_history']
         completed = [event.split(':', 1)[1] for event in events if event.startswith('jev:')]
         assert [r['intent'] for r in history['recent_actions']] == completed[-8:]
@@ -121,7 +122,7 @@ def fake_run(destination, fail_start=False):
     library = Path(destination)/'library.json'
     library.write_text(json.dumps(lib))
     def exit_process(code): raise SystemExit(code)
-    env = {'HORIZON': '20', 'MAX_DEC': '3', 'GATE_JEV': '0', 'SLOW_MIN_GAP_S': '0'}
+    env = {'HORIZON': '20', 'MAX_DEC': '3', 'GATE_JEV': '0', 'SLOW_MIN_GAP_S': '0', 'VIDEO': ''}
     with patch.dict(os.environ, env, clear=True), patch.object(CAS, 'call_codex', side_effect=codex), \
          patch.object(sys, 'argv', ['run_ep_fbpatch.py','fake_suite','0','0',str(library),destination]), \
          patch.object(os, '_exit', side_effect=exit_process):
