@@ -31,6 +31,12 @@ same simulation step, after any recovery motion. Jev no longer receives cached
 `seen_held`, `at_grasp`, `above_place`, grasp/place coordinates, predicate meanings,
 active recovery matches or a static phase-order prior as current facts.
 
+Acting Jev additionally receives the last eight completed intent/result pairs,
+plus the consecutive count of the same intent and the same intent/result pair.
+Counts cover the full trailing streak even when it exceeds eight actions.
+These are past executor outcomes, not assertions about the current scene or
+task completion. Candidate wording and decision instructions are unchanged.
+
 Candidates describe applicability and actual motion. An empty closed gripper
 should reopen; `reopen_and_retry` opens **at the current pose**, leaving alignment
 or relook to the next decision. Repeating `close_gripper` while already closed

@@ -79,6 +79,10 @@ def fake_run(destination, fail_start=False):
         assert kwargs.get('assets'), 'Jev must receive real image assets'
         assert 'task_todo' in state and 'proprioception' in state
         assert 'observed_facts' not in state and 'experience_brief' not in state
+        history = state['execution_history']
+        completed = [event.split(':', 1)[1] for event in events if event.startswith('jev:')]
+        assert [r['intent'] for r in history['recent_actions']] == completed[-8:]
+        assert all(set(r) == {'intent', 'result'} for r in history['recent_actions'])
         assert set(state['proprioception']) == {'gripper_xyz_m', 'gripper_orientation_xyzw', 'finger_joint_positions_m', 'fingers_opening_m', 'gripper_closed_command', 'left_finger_contact', 'right_finger_contact'}
         chosen = next(choices)
         assert chosen in criteria

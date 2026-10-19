@@ -41,6 +41,11 @@ frames. Contact flags never identify the touched object.
 
 Neither acting nor spectator Jev gets cached grasp/place coordinates, `seen_held`,
 geometry-derived predicates, predicate meanings or active recovery matches.
+Acting additionally receives `execution_history`: the last eight completed
+intent/result pairs, the last intent, and full trailing counts for the same
+intent and the same intent/result pair. Forced high-level actions are included
+because they were executed. These records describe past executor outcomes;
+they do not assert that an object is currently held or that a goal is complete.
 Spectator additionally gets actual recent intent/result events and help budgets.
 Controller geometry and predicates stay in the executor and planner context;
 they are not deleted from the system.

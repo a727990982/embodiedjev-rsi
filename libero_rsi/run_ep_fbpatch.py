@@ -682,9 +682,11 @@ def _current_observation():
     return proprio, frames
 
 
-def _jev_input():
+def _jev_input(*, include_execution_history=False):
     proprio, frames = _current_observation()
     state, assets = JO.build_state(LANG, EP['task_todo'], proprio, frames, T[0], DONE[0])
+    if include_execution_history:
+        state['execution_history'] = JO.execution_history(EP['hist'], EP['result_hist'])
     # Store the exact observation sent to Jev; no privileged diagnostic fields.
     EP['vision_serial'] += 1
     paths = {}
@@ -2763,7 +2765,7 @@ try:
         if forced:
             it, probs = forced, None
         else:
-            state, assets = _jev_input()
+            state, assets = _jev_input(include_execution_history=True)
             menu = {k: v for k, v in intents.items()
                     if k != 'close_gripper' or goal_id_confirmed()}
             it, probs, _ = JC.choose(state, JO.INSTRUCTIONS,
