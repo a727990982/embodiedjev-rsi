@@ -712,6 +712,20 @@ def _save_task_todo(reason):
     log(t=T[0], task_todo=EP['task_todo'], todo_reason=reason)
 
 
+def _refresh_task_progress(intent=None, result=None):
+    """Main-thread sensor refresh; checkpoints never retarget or call a model."""
+    target_rev = GOAL_TARGET['rev']
+    updated = TODO.refresh_progress(
+        EP['task_todo'], EP['todo_target_id'], T[0],
+        identity_confirmed=goal_id_confirmed(), grasp_ready=_transport_grasp_ready(),
+        gripper_closed=EP['closed'], intent=intent, result=result,
+        waypoints_changed=EP.get('todo_progress_target_rev', target_rev) != target_rev)
+    EP['todo_progress_target_rev'] = target_rev
+    if updated != EP['task_todo']:
+        EP['task_todo'] = updated
+        _save_task_todo('stage_progress')
+
+
 def _retarget_todo():
     """Invalidate old grasp state; localize and verify the active todo object."""
     item = TODO.active_item(EP['task_todo'])
@@ -2726,6 +2740,7 @@ try:
         raise RuntimeError(f"episode_start_plan_failed:{START_PLAN_OUT['error']}")
     intents = {i['name']: i for i in LIB['intents']}
     while T[0] < HORIZON and not DONE[0] and dec < MAX_DEC:
+        _refresh_task_progress()
         if EP.get('todo_review_due'):
             _review_task_todo(EP.pop('todo_review_due'))
         if EP['closed'] and not any(contacts()):
@@ -2801,6 +2816,7 @@ try:
                     tcp=list(np.asarray(ns['tcp'], float).round(4)))
             except Exception:
                 pass
+        _refresh_task_progress()
         if forced:
             it, probs = forced, None
         else:
@@ -2810,6 +2826,7 @@ try:
                                      JO.candidate_definitions(menu), assets=assets, meta=META)
             jev_calls += 1
         CUR['intent'] = it; r = execute(it, ns); dec += 1
+        _refresh_task_progress(it, r)
         EP['last_result'] = r
         if it in ASK_ASTRA_NAMES or it in ('relook', 'retreat') or r in FAIL_RESULTS or 'empty' in str(r):
             EP['todo_review_due'] = f'{it}:{r}'
@@ -2866,6 +2883,7 @@ try:
                         if so is not None or sr not in skip:
                             slow_events.append({'dec': dec, 'intent': it, 'intent_result': r, 'result': sr, 'detail': so})
                             log(dec=dec, t=T[0], slow_think=sr, intent=it, intent_result=r, detail=so)
+        _refresh_task_progress()
         if r == 'finish': break
     # LIBERO official eval does not stop on a policy 'finish': keep no-op stepping (gripper holds last command) until done or HORIZON
     stop = 'finish' if EP['prev'] == 'finish' else ('decision_cap' if dec >= MAX_DEC else None); t_stop = T[0]
@@ -2873,6 +2891,7 @@ try:
         step([0, 0, 0, 0, 0, 0, 1 if EP['closed'] else -1])
     if DONE[0]: end = 'success' if stop is None else f'{stop}_then_success'
     else: end = f'{stop}_not_success' if stop else 'horizon'
+    _refresh_task_progress()
     res['stopped_at_step'] = t_stop if stop else None
 except Exception:
     import traceback; end = 'harness_error'; res['error'] = traceback.format_exc()[-1200:]

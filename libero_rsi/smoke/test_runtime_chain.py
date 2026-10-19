@@ -78,6 +78,11 @@ def fake_run(destination, fail_start=False):
     def choose(state, instruction, criteria, **kwargs):
         assert kwargs.get('assets'), 'Jev must receive real image assets'
         assert 'task_todo' in state and 'proprioception' in state
+        stage_progress = state['task_todo']['items'][0]['progress']
+        assert len(stage_progress['stages']) == 6
+        assert stage_progress['checked_at_step'] == state['observation_step']
+        assert stage_progress['next_stage'] == 'secure_grasp'
+        assert not stage_progress['current_grasp_confirmed']
         assert 'observed_facts' not in state and 'experience_brief' not in state
         assert not {'lift', 'carry_to_place', 'lower_to_place'} & set(criteria), 'Empty hand must not be offered transport'
         history = state['execution_history']

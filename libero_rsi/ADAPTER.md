@@ -48,7 +48,9 @@ because they were executed. These records describe past executor outcomes;
 they do not assert that an object is currently held or that a goal is complete.
 Spectator additionally gets actual recent intent/result events and help budgets.
 Controller geometry and predicates stay in the executor and planner context;
-they are not deleted from the system.
+they are not deleted from the system. Nested todo `progress` exposes discrete
+executor checkpoints and a sensor-refreshed `current_grasp_confirmed` flag,
+not coordinates or cached visual held estimates.
 
 Transport candidates (`lift`, `carry_to_place`, `lower_to_place`) require a
 closed gripper, confirmed target identity, a successful grasp confirmation, and
@@ -71,6 +73,37 @@ The start planner must return `task_todo.items`, each with unique `id`, `target`
 `goal`, and `completion_condition`. All start as pending, regardless of a planner
 claim of completion. Each item describes an object's desired final outcome,
 not a fixed sequence of motor commands. The first non-done item is active.
+
+`task_todo.initialize` adds six nested checkpoints to each object: identity,
+secure grasp, lift clearance, transport, release height, and verified placement
+with clearance. Planner-supplied checkpoint completions are ignored. The main
+loop refreshes progress before selection and after execution/recovery. Identity
+uses the existing visual gate; current grasp uses the same live precondition as
+transport. Motion checkpoints require a completed `reached`/`at_target` result
+with a supported grasp. They record achieved waypoints in this grasp, not current
+object pose or collision-free-path certification. Lowering requires a previously
+reached destination checkpoint. Loss of grasp, premature reopening or identity
+loss revokes dependent checkpoints; localization/patch revision changes invalidate
+motion waypoints. These operations do not invoke a model, retarget an object,
+alter candidates, or force Jev's next intent. They are distinct from Astra's
+final-outcome review and do not turn `pending` into a grasp-failure signal.
+
+After a supported grasp and transport, actual `open_gripper` completion enters
+`awaiting_placement_review`; it does not complete placement. Retreat/review may
+follow without reacquiring the object. Visible placement failure resets progress;
+occlusion retains the pending review. Verified final placement completes the last
+checkpoint and marks unobserved intermediate checkpoints `not_required`, not
+fabricated `done`. Step transitions never change top-level `active_id`.
+
+For Jev, `decision_view` nests the old outcome evidence/timestamp under
+`last_visual_review`; current stage progress has its own timestamp. Saved todo
+artifacts retain the original review fields as well as stage progress.
+
+For a pending/uncertain post-release outcome, Astra must return `needs_regrasp`:
+true for visible failed placement requiring another grasp, false when only
+clearance/verification remains, or null if uncertain. Only true revokes the
+placement attempt's progress. This prevents a successful release with the gripper
+still near the rim from incorrectly restarting the grasp stages.
 
 After release, relook, retreat, help, failure, or a premature finish request,
 Astra reviews every item using a new same-frame image/sensor snapshot. A complete
