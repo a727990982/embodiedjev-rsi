@@ -13,6 +13,11 @@ FIELDS = ('gripper_xyz_m', 'gripper_orientation_xyzw', 'finger_joint_positions_m
           'fingers_opening_m', 'gripper_closed_command',
           'left_finger_contact', 'right_finger_contact')
 INSTRUCTIONS = (
+    'Standard movement intents use two-stage control: you choose the intent here, '
+    'then choose XYZ directions and fingers in a separate motor request. Each motor '
+    'command runs for at most eight control steps. in_progress means the waypoint '
+    'is unfinished, not a failed motion; continue the intent when current observations '
+    'support it. Only reached/at_target establishes waypoint arrival. '
     'Choose one immediate intent using task_todo, CURRENT camera images and proprioception. '
     'Todo goals are desired outcomes, not current visual facts or a fixed motor sequence. '
     'Use the active object progress stages and next_stage to distinguish grasp, lift, '

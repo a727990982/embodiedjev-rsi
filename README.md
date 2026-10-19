@@ -2,6 +2,13 @@
 
 Public snapshot of the LIBERO RSI / EmbodiedJev harness. This repo had no prior tree, so the agent module, episode runner, experience brief, libraries, logic smokes, and review notes all live under `libero_rsi/`.
 
+Standard movement intents now use **Jev intent → Jev XYZ/finger Choices → a
+bounded LIBERO servo block → fresh observation**. This adapts the two-stage
+controller from Jev-as-Policy. Directions are chosen together in one motor
+request; distance follows the visual-estimate waypoint and controller limits.
+See [Cartesian policy migration](libero_rsi/reviews/cartesian_policy.md) for the
+execution contract, differences from upstream, call accounting and validation.
+
 | Path | Role |
 |---|---|
 | `libero_rsi/coding_agent_slow.py` | Codex CLI transport for start planning, slow-think, Astra perception and identity checks. |
@@ -14,6 +21,7 @@ Public snapshot of the LIBERO RSI / EmbodiedJev harness. This repo had no prior 
 | `libero_rsi/task_todo.py` | Task objectives, evidence-backed progress, and active object selection. |
 | `libero_rsi/jev_observation.py` | Same-frame camera/proprioception input and applicable intent definitions. |
 | `libero_rsi/jev_choice.py` | Bundled TypeSafe Jev 1.14 image-capable HTTP client. |
+| `libero_rsi/cartesian_policy.py` | XYZ/finger motor questions and signed, endpoint-clamped displacement. |
 | `libero_rsi/validate.py` | Library validator. Imports sibling `dsl_libero.py`. |
 | `libero_rsi/dsl_libero.py` | Expression DSL and dimensional checks used by the validator and logic smokes. |
 | `libero_rsi/libs/*.json` | Experience libraries, including `ee_pg_easy_v2_lib.json`. |

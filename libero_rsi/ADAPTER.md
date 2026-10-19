@@ -1,5 +1,14 @@
 # LIBERO harness runtime contract
 
+Standard move execution uses two sequential acting decisions: the existing intent
+Choice followed by one `choose_questions` request containing X/Y/Z and fingers.
+Both use current images and own-robot measurements. The motor context adds only
+the existing visual-estimate library waypoint. Each translation is bounded to
+eight environment steps and may return `in_progress`; see
+[the Cartesian policy contract](reviews/cartesian_policy.md). Recovery/pose/fine
+step executors retain their existing routing. Network inference is synchronous
+with respect to simulation stepping, unlike upstream Jev-as-Policy.
+
 Run from the repository root:
 
 ```bash

@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw
 from scipy.spatial.transform import Rotation as Rot
 
 import motion_feedback as MF
+import cartesian_policy as CP
 
 from .config import HORIZON, S
 from .state import CUR, DONE, EP, PATCH, PER, RSHAPE, SHAPE, T, log, rt
@@ -160,7 +161,8 @@ def orientation_feedback(target_rotation=None, tolerance_rad=.08):
             'source': 'commanded full orientation versus current robot proprioception; not scene truth'}
 
 
-def servo(target, grip, gain=1.0, max_steps=60, tol=.006, ori_tol=None):
+def servo(target, grip, gain=1.0, max_steps=60, tol=.006, ori_tol=None, *,
+          motor=None, speed_m_s=.14):
     last = eef(); stall = 0; prev_ori = None
     start, start_step = last.copy(), T[0]
     Rt = commanded_rotation()
@@ -178,6 +180,9 @@ def servo(target, grip, gain=1.0, max_steps=60, tol=.006, ori_tol=None):
             actual_rotation_angle_deg=float(np.rad2deg(np.linalg.norm((Rot.from_quat(rt.obs['robot0_eef_quat']) * start_rotation.inv()).as_rotvec()))))
         EP['last_motion'].update(orientation=orientation,
             position_reached=bool(np.linalg.norm(target-eef()) < tol), position_tolerance_m=tol)
+        if motor is not None:
+            EP['last_motion'].update(motor_choices=dict(motor), control_block_steps=max_steps,
+                                    commanded_speed_cap_m_s_per_axis=speed_m_s)
         if ori_tol is not None:
             EP['last_orientation_motion'] = EP['last_motion']
         EP['motion_before_path'] = None
@@ -192,6 +197,11 @@ def servo(target, grip, gain=1.0, max_steps=60, tol=.006, ori_tol=None):
     for _ in range(max_steps):
         if T[0] >= HORIZON or DONE[0]: return finish('horizon_or_done')
         d = target - eef(); a = np.zeros(7); a[:3] = np.clip(d / .05 * 1.6, -1, 1) * float(np.clip(gain, .15, 1.0))
+        if motor is not None:
+            # LIBERO OSC maps normalized translation to metres. Retain the
+            # selected signs, cap by simulation timestep and stop at the endpoint.
+            delta = CP.signed_delta(d, motor, speed_m_s, rt.env.env.control_timestep)
+            a[:3] = np.clip(delta / .05, -1, 1) * float(np.clip(gain, .15, 1.0))
         er = (Rt * Rot.from_quat(rt.obs['robot0_eef_quat']).inv()).as_rotvec(); a[3:6] = np.clip(er / .5 * 1.2, -1, 1)
         a[6] = grip; step(a)  # gripper binary open/close (EmbodiedEvo-style)
         contact_state = robot_contacts()
@@ -205,7 +215,7 @@ def servo(target, grip, gain=1.0, max_steps=60, tol=.006, ori_tol=None):
         mv = np.linalg.norm(eef() - last); last = eef()
         stall = stall + 1 if mv < .0005 and not ori_progress else 0
         if stall >= 8: return finish('stalled')
-    return finish('timeout')
+    return finish('in_progress' if motor is not None else 'timeout')
 
 
 def grip(g, n):
