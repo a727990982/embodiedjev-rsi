@@ -1078,7 +1078,7 @@ def _cmd_yaw_deg():
         return float(RSHAPE['yaw'])
     return float(PER.get('yaw', 0.0))
 
-def _relative_yaw_delta_deg(ns):
+def _relative_yaw_delta_deg(ns, approach_changes=None):
     """Sign from observed finger contact asymmetry; else alternate. Magnitude is a relative step, not a scene angle."""
     l = bool(ns.get('left_contact')) if ns else False
     r = bool(ns.get('right_contact')) if ns else False
@@ -1087,9 +1087,119 @@ def _relative_yaw_delta_deg(ns):
     elif r and not l:
         sign = -1.0
     else:
-        sign = 1.0 if (EP.get('approach_changes', 0) % 2 == 0) else -1.0
+        count = EP.get('approach_changes', 0) if approach_changes is None else approach_changes
+        sign = 1.0 if (count % 2 == 0) else -1.0
     # Relative quarter-turn/2 step about vertical; not the lucky scene-specific 90° from one success.
     return sign * 45.0
+
+
+def _approach_yaw_plan(ns, approach_changes):
+    """Read-only commanded yaw calculation shared by description and executor."""
+    delta = _relative_yaw_delta_deg(ns, approach_changes)
+    current = _cmd_yaw_deg()
+    target = float(np.clip(current + delta, -90.0, 90.0))
+    if abs(target - current) < 1.0:
+        target = float(np.clip(current - delta, -90.0, 90.0))
+    return current, delta, target
+
+
+def _clear_reapproach_delta(ns):
+    """Read-only offset rule; these values adjust an estimate, not an object."""
+    left, right = bool(ns.get('left_contact')), bool(ns.get('right_contact'))
+    if left and not right: return .4, 0.0
+    if right and not left: return -.4, 0.0
+    tcp = np.asarray(ns.get('tcp', eef()), float)
+    objc = np.asarray(ns.get('objc', PER.get('objc', tcp)), float)
+    delta = objc[:2] - tcp[:2]
+    norm = float(np.linalg.norm(delta)) + 1e-9
+    return .25 * delta[0] / norm, .25 * delta[1] / norm
+
+
+def _candidate_execution(menu, ns, state):
+    """Describe allowed candidates without stepping, mutating state or predicting physics."""
+    descriptions = {}
+    tcp = np.asarray(ns['tcp'], float)
+    for name in menu:
+        if name not in ('move_above_object', 'descend_to_grasp', 'clear_reapproach', 'change_approach_yaw'):
+            continue
+        it = menu[name]
+        d = {'observation_step': state['observation_step'],
+             'source': 'executor rules, current proprioception and visual estimates; no physics rollout',
+             'program_steps': [], 'conditional_effects': [],
+             'unverified_physics': ['Whether the motion reaches its target without obstruction or unintended contact.',
+                                    'Target graspability and eventual task success.']}
+        if name in ('move_above_object', 'descend_to_grasp'):
+            # Custom same-name actions must not inherit an invented move description.
+            if it.get('action', 'move') != 'move' or it.get('fingers') == 'close':
+                continue
+            finger = it.get('fingers', 'keep')
+            d['program_steps'].append({'gripper_command': finger,
+                'command_transition_needed': (finger == 'open' and EP['closed']) or (finger == 'close' and not EP['closed'])})
+            try:
+                target = np.asarray(dsl.evaluate(it['refpoint'], ns), float).reshape(3)
+            except Exception:
+                d['program_steps'].append({'return': 'refpoint_error', 'servo_motion': False})
+                d['conditional_effects'] = ['No movement target can be evaluated; this call cannot test descent.']
+                descriptions[name] = d
+                continue
+            else:
+                def ev(key):
+                    try: return float(dsl.evaluate(str(it[key]), ns)) if key in it else None
+                    except Exception: return None
+                shape = {'tilt': ev('tilt_deg') or 0.0, 'tdir': ev('tilt_dir_deg') or 0.0, 'yaw': ev('yaw_deg')}
+                within = float(np.linalg.norm(target - tcp)) < .006
+                d['program_steps'].append({'operation': 'position_check_then_optional_servo',
+                    'commanded_tcp_target_m': target.tolist(), 'requested_delta_m': (target-tcp).tolist(),
+                    'commanded_orientation_deg': _motion_orientation(shape), 'position_tolerance_m': .006,
+                    'within_tolerance_at_observation': within,
+                    'branch': 'At execution, return at_target if within tolerance; otherwise attempt servo. Opening fingers first may change the pose.'})
+            if name == 'move_above_object':
+                d['conditional_effects'] = ['Reaching the approach waypoint only prepares the next decision; no descent or grasp is tested.']
+            else:
+                d['conditional_effects'] = ['If motion is needed, this attempts a descent test; at_target performs no new motion. Closing is a separate choice, offered only if the existing identity and position guards pass afterward.']
+        else:
+            # execute clears stale grasp latches before entering this recovery path.
+            # _note_grasp_progress may then recognize a closed bilateral contact.
+            if EP['closed'] and bool(ns.get('contact')):
+                followup = 'lift' if any(i['name'] == 'lift' for i in LIB['intents']) else 'move_above_object'
+                d['program_steps'] = [{'operation': 'existing_grasp_preservation_guard',
+                                       'queued_followup': followup, 'local_preparation_skipped': True}]
+                d['conditional_effects'] = ['The existing closed/bilateral-contact guard preserves the grip; it does not newly verify target identity.']
+                descriptions[name] = d
+                continue
+            fire, reason = _local_deadend_should_trigger(pending_action=name, check_grasp=False)
+            if not EP.get('in_local_deadend') and fire:
+                d['program_steps'] = [{'operation': 'existing_global_deadend_guard', 'reason': reason,
+                    'steps': 'Retreat for a global view, relocalize, and request bounded diagnosis; the nominal local recovery is replaced.'}]
+                d['conditional_effects'] = ['Subsequent recovery depends on the new observation and available help budget; no descent result is known.']
+            else:
+                scale = 3.0 if name == 'clear_reapproach' else 2.0
+                raise_m = max(scale * float(PER.get('obj_h', .05)), .06)
+                patch_z = float(np.clip(float(PATCH.get('grasp_dz_objh') or 0.0) + .15, -.5, .5))
+                if name == 'clear_reapproach':
+                    delta = _clear_reapproach_delta(ns)
+                    old = PATCH.get('grasp_dxy_objw') or [0.0, 0.0]
+                    offset = [float(np.clip(a+b, -1.5, 1.5)) for a,b in zip(old,delta)]
+                    d['program_steps'] = [
+                        {'operation': 'attempt_upward_servo', 'requested_raise_m': raise_m, 'gripper': 'keep current command'},
+                        {'operation': 'update_visual_grasp_offsets', 'xy_object_width_units': offset,
+                         'z_object_height_units': patch_z, 'commanded_yaw_deg_unchanged': _cmd_yaw_deg()}]
+                else:
+                    current, _, yaw = _approach_yaw_plan(ns, int(EP.get('approach_changes', 0)) + 1)
+                    d['program_steps'] = [
+                        {'operation': 'set_approach_command', 'yaw_from_deg': current, 'yaw_to_deg': yaw,
+                         'z_object_height_units': patch_z},
+                        {'operation': 'attempt_upward_servo_with_new_orientation', 'requested_raise_m': raise_m,
+                         'gripper': 'keep current command'}]
+                d['program_steps'].append({'operation': 'queue_existing_followup', 'intent': 'move_above_object'})
+                d['conditional_effects'] = ['If recovery is not interrupted, the executor queues approach; neither recovery nor approach tests descent.',
+                                            'The existing post-recovery deadend guard can still request global relook/diagnosis.']
+                d['unverified_physics'].append('Whether the hand actually reaches the commanded yaw; upward servo has no orientation-convergence requirement.')
+            recovery = state.get('motion_context', {}).get('recovery_validation', {})
+            d['current_recovery_evidence'] = {k: recovery[k] for k in
+                ('preparations_without_descent', 'no_progress', 'descent_tested_since_preparation') if k in recovery}
+        descriptions[name] = d
+    return descriptions
 
 def _raise_tcp(scale=2.0, max_steps=40):
     """Lift gripper in place (open or closed as currently commanded)."""
@@ -1346,10 +1456,10 @@ def _local_deadend_counts():
         'local_deadend_global_relooks': int(EP.get('local_deadend_global_relooks', 0)),
     }
 
-def _local_deadend_should_trigger(pending_action=None):
+def _local_deadend_should_trigger(pending_action=None, check_grasp=True):
     """True when local view/actions have no useful solution — force global relook + sync slow.
     General (no object-name hacks). Skips if grasp already secured or global budget exhausted."""
-    if EP.get('grasp_secured_once') or _grasp_secured_now():
+    if check_grasp and (EP.get('grasp_secured_once') or _grasp_secured_now()):
         return False, None
     if int(EP.get('local_deadend_global_relooks', 0)) >= MAX_LOCAL_DEADEND_GLOBAL:
         return False, 'global_relook_budget_exhausted'
@@ -1626,12 +1736,7 @@ def _choose_stall_feedback(ns):
 def _apply_relative_approach_change(ns, reason):
     """Raise then rotate approach about vertical relative to current command. Mutates PATCH; physical raise."""
     EP['approach_changes'] = int(EP.get('approach_changes', 0)) + 1
-    delta = _relative_yaw_delta_deg(ns or {})
-    cur = _cmd_yaw_deg()
-    new_yaw = float(np.clip(cur + delta, -90.0, 90.0))
-    # If clip removed the change, flip the other way once.
-    if abs(new_yaw - cur) < 1.0:
-        new_yaw = float(np.clip(cur - delta, -90.0, 90.0))
+    cur, delta, new_yaw = _approach_yaw_plan(ns or {}, EP['approach_changes'])
     PATCH['yaw_deg'] = new_yaw
     # Shallower fingertip target (positive dz = higher grasp) — observed stall often needs less depth.
     PATCH['grasp_dz_objh'] = float(np.clip(float(PATCH.get('grasp_dz_objh') or 0.0) + 0.15, -0.5, 0.5))
@@ -1887,16 +1992,7 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
         EP['clear_reapproach_n'] = int(EP.get('clear_reapproach_n', 0)) + 1
         detail['clear_reapproach_n'] = EP['clear_reapproach_n']
         _raise_tcp(3.0)
-        if l and not r:
-            detail['grasp_dxy_objw'] = _nudge_grasp_xy(0.4, 0.0)  # dimensionless lateral bias away from left pad
-        elif r and not l:
-            detail['grasp_dxy_objw'] = _nudge_grasp_xy(-0.4, 0.0)
-        else:
-            # No pad signal: small recenter toward object centre if available.
-            tcp = np.asarray(ns.get('tcp', eef()), float)
-            objc = np.asarray(ns.get('objc', PER.get('objc', tcp)), float)
-            delta = objc[:2] - tcp[:2]; nrm = float(np.linalg.norm(delta)) + 1e-9
-            detail['grasp_dxy_objw'] = _nudge_grasp_xy(0.25 * delta[0] / nrm, 0.25 * delta[1] / nrm)
+        detail['grasp_dxy_objw'] = _nudge_grasp_xy(*_clear_reapproach_delta(ns))
         # Shallower fingertip target for vertical re-approach from clearance (no yaw mutation).
         PATCH['grasp_dz_objh'] = float(np.clip(float(PATCH.get('grasp_dz_objh') or 0.0) + 0.15, -0.5, 0.5))
         detail['grasp_dz_objh'] = PATCH['grasp_dz_objh']
@@ -3396,8 +3492,11 @@ try:
         else:
             state, assets = _jev_input(include_execution_history=True)
             menu = _acting_menu(intents, ns)
+            execution = _candidate_execution(menu, ns, state)
+            criteria = JO.candidate_definitions(menu, execution)
+            log(t=T[0], candidate_execution=execution, candidate_definitions=criteria)
             it, probs, _ = JC.choose(state, JO.INSTRUCTIONS,
-                                     JO.candidate_definitions(menu), assets=assets, meta=META)
+                                     criteria, assets=assets, meta=META)
             jev_calls += 1
         CUR['intent'] = it; r = execute(it, ns); dec += 1
         _refresh_task_progress(it, r)

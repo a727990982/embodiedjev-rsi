@@ -92,6 +92,11 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False):
         assert [r['intent'] for r in history['recent_actions']] == completed[-8:]
         assert all(set(r) == {'intent', 'result'} for r in history['recent_actions'])
         assert set(state['proprioception']) == {'gripper_xyz_m', 'gripper_orientation_xyzw', 'finger_joint_positions_m', 'fingers_opening_m', 'gripper_closed_command', 'left_finger_contact', 'right_finger_contact'}
+        for name in ('clear_reapproach','move_above_object','descend_to_grasp','change_approach_yaw'):
+            if name in criteria:
+                description=json.loads(criteria[name].split('Current execution description: ')[1])
+                assert description['observation_step']==state['observation_step']
+                assert description['program_steps'] and description['unverified_physics']
         chosen = next(choices)
         active_targets.append(state['task_todo']['active_id'])
         assert chosen in criteria
