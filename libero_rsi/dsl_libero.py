@@ -19,8 +19,9 @@ FUNCS = {'vec': vec, 'dist': dist, 'dist_xy': dist_xy, 'max_abs_xy': max_abs_xy,
 
 # observed quantities (all from proprioception, tactile proxy, Astra episode-start perception, or task statement)
 # LIBERO: proprioception (tcp, opening, opening_at_close, tcp_at_close), robot spec (open_max),
+# controller spec (fine_unit = one centimetre; not a scene length),
 # Astra episode-start / re-look perception (grasp, objc, place, obj_h, clear). No simulator object poses.
-LENGTH_VARS = ('tcp', 'grasp', 'objc', 'place', 'opening', 'opening_at_close', 'tcp_at_close', 'obj_h', 'obj_w', 'clear', 'open_max')
+LENGTH_VARS = ('tcp', 'grasp', 'objc', 'place', 'opening', 'opening_at_close', 'tcp_at_close', 'obj_h', 'obj_w', 'clear', 'open_max', 'fine_unit')
 COUNT_VARS = (
     'n_same', 'step', 'n_close', 'n_relook', 'clear_reapproach_n', 'push_aside_n',
     'place_lower_stall_n', 'place_lift_lower_cycles',

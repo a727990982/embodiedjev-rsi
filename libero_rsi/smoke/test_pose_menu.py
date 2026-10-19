@@ -4,6 +4,8 @@ import json
 import os
 import sys
 import unittest
+import tempfile
+from PIL import Image
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +13,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+import motion_feedback as MF
 import validate
 from test_review_regressions import functions
 
@@ -208,7 +211,7 @@ class PoseMenuTests(unittest.TestCase):
         scope = pose_scope(
             EP=ep, PATCH=patch_state, PER=per, RSHAPE=rshape, servo=fake_servo, eef=lambda: tcp.copy(),
             _cmd_yaw_deg=lambda: 10.0, log=lambda **kw: None, T=[3],
-            HOME_EEF=np.array([0.4, 0.1, 0.7]), CP=np.array([0.0, -0.5, 1.2]),
+            SHAPE={'yaw':0,'tilt':0,'tdir':0}, HOME_EEF=np.array([0.4, 0.1, 0.7]), CP=np.array([0.0, -0.5, 1.2]),
         )
         spec = {s['name']: s for s in scope['_pose_menu_intent_specs']()}
         result = scope['_execute_pose_menu'](spec['rotate_yaw_plus_15'], {'tcp': tcp})
@@ -264,17 +267,26 @@ class PoseMenuTests(unittest.TestCase):
         self.assertEqual(ep['pose_menu_counts']['rotate'], 2)
         self.assertEqual(ep['pose_menu_counts']['align'], 3)
         self.assertEqual(ep['pose_menu_counts']['home'], 1)
+        scope['servo']=lambda *a,**kw:'stalled'
+        scope['_execute_pose_menu'](spec['return_home'],{'tcp':tcp})
+        self.assertEqual(patch_state['yaw_deg'],0.0)
+        self.assertIn('overrides cleared=False',ep['pose_menu_note'])
 
-    def test_outcome_appears_in_jev_facts_only_when_the_menu_is_on(self):
-        lib = {'intents': [{'name': 'finish', 'action': 'finish'}]}
-        scope = pose_scope(LIB=lib, EP={'pose_menu_note': 'return home: servo reached'})
-        self.assertNotIn('pose_action_outcome', self._facts(scope, lib))
-        with patch.dict(os.environ, {'POSE_MENU': '1'}):
-            facts = self._facts(scope, lib)
-        self.assertEqual(facts['pose_action_outcome'], 'return home: servo reached')
-        lib['intents'].append({'name': 'return_home', 'action': 'pose_menu', 'pose': 'home'})
-        os.environ['POSE_MENU'] = '0'
-        self.assertIn('pose_action_outcome', self._facts(scope, lib))
+
+    def test_outcome_reaches_current_observation(self):
+        from test_transport_feedback import fixture
+        import jev_observation as JO
+        scope,ep,_,_=fixture()
+        ep['pose_menu_note']='return home: servo reached'
+        scope['_current_observation']=lambda:({key:0 for key in JO.FIELDS},
+                                              {'front':np.zeros((2,2,3),dtype='uint8')})
+        with tempfile.TemporaryDirectory() as temp:
+            scope['ep_dir']=temp
+            state,_=scope['_jev_input']()
+            self.assertNotIn('pose_action_outcome',state['motion_context'])
+            scope['_pose_menu_visible']=lambda:True
+            state,_=scope['_jev_input']()
+            self.assertEqual(state['motion_context']['pose_action_outcome'],ep['pose_menu_note'])
 
     def test_servo_keeps_position_success_unless_orientation_is_requested(self):
         fn = next(n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name == 'servo')
@@ -305,13 +317,16 @@ class PoseMenuTests(unittest.TestCase):
             elif WORLD['mode'] == 'spin':
                 WORLD['err'] = max(0.0, WORLD['err'] - 0.25)
 
+        temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup)
         scope = functions(
             'servo', np=np, eef=eef, step=step, T=T, DONE=[False], HORIZON=1000, Rot=FakeRot, Q0=FakeRot(),
             obs={'robot0_eef_quat': np.array([0.0, 0.0, 0.0, 1.0])},
             PATCH={'yaw_deg': 0.0, 'tilt_deg': 0.0, 'tilt_dir_deg': 0.0},
             RSHAPE={'yaw': None, 'tilt': None, 'tdir': None},
             SHAPE={'yaw': None, 'tilt': 0.0, 'tdir': 0.0},
-            PER={'yaw': 0.0},
+            PER={'yaw': 0.0}, EP={}, MF=MF, Image=Image, ep_dir=temp.name,
+            robot_contacts=lambda:{'environment_contact_parts':[], 'self_contact_parts':[]},
+            _combo_rgb=lambda:(np.zeros((3,6,3),dtype='uint8'),None,None),log=lambda **kw:None,
         )
         WORLD['mode'] = 'translate'
         WORLD['steps'] = 0

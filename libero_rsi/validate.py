@@ -9,7 +9,8 @@ def validate(lib):
         d = dsl.check_dims(p['expr'], preds); assert d == 'B', f"predicate {p['name']} not bool ({d})"; dsl.check_text(p.get('meaning', ''), p['name']); preds.append(p['name'])
     names = [i['name'] for i in lib['intents']]; assert 'finish' in names
     for i in lib['intents']:
-        if i.get('action', 'move') == 'move':
+        # fine_step is a bounded relative move: same dimensional checks as move; the harness clamps it.
+        if i.get('action', 'move') in ('move', 'fine_step'):
             d = dsl.check_dims(i['refpoint'], preds); assert d == 'L', f"refpoint {i['name']} dim {d}"
             g = dsl.check_dims(str(i.get('gain', '1')), preds); assert g in ('C', 'N'), f"gain {i['name']} must be dimensionless"
             for k in ('tilt_deg', 'tilt_dir_deg', 'yaw_deg', 'grasp_dz_objh'):

@@ -51,6 +51,8 @@ You receive:
 - patch_goal: current PATCH offsets + GOAL_ID confirmation
 - keyframe_paths: 0–4 still image paths (front+wrist composites when present)
 - trigger: why you were woken (stall / spectator_defer / hard_identity / ask_astra / …)
+- motion_context: requested/actual displacement and robot-part contacts, including palm/arm/fixtures.
+  If two keyframes are supplied, the first is before the failed motion and the last is current.
 
 EmbodiedEvo analogy: there the coding agent writes solution.py from observations/.
 Here Jev already selects intents; you only patch the episode plan / recovery.
@@ -80,8 +82,18 @@ Rules:
 - Identity wrong/unsure → intervene + lead with relook.
 - Identity confirmed + neighbour block → prefer push_aside or clear_reapproach (not relook-only).
 - Empty close / stalled descent → raise_redescend or lateral_recenter.
+- Diagnose a stall using displacement, before/after images and contact parts. Finger contact=false
+  does not mean the palm or arm is clear. Contact alone does not prove blockage. Report uncertainty
+  when depth/occlusion or unreachable grasp geometry could explain the failure. Do not repeat the
+  same unchanged waypoint; prefer retreat/change approach before considering an obstacle push.
 - Prefer intervene=false when progressing normally with confirmed identity.
-- Fine-tune only: honour episode_start_plan phase_order (incl. post-place retreat / next-object cycles); do not drop them.
+- recovery_validation describes completed preparation/approach cycles. clear_reapproach only
+  raises/recenters and queues move_above_object; it does not descend or test clearance.
+  When recovery_validation.no_progress is true, previous preparation has already been tried
+  without useful position/contact progress or a descent test. Reassess the obstacle/approach
+  from current images and the last_failed_motion; do not simply repeat the same preparation.
+  Jev chooses the next descent test after the plan. Explain what changed and remains unverified.
+- Use task_todo and active_goal for the current task objective. The episode_start_plan is historical advice; it must not override current images, a target handoff, or a failed grasp. Preserve appropriate post-place clearance while recovering.
 - Episode-only: do not invent library-wide recoveries here.
 
 Context JSON:
@@ -640,11 +652,15 @@ full episode phase_order; do NOT leave place→next-object or post-place clearan
 Language goal: {lang}
 
 You receive:
-- start stills (front agentview; optional wrist) — pixel coords refer to FRONT image
+- start stills (front agentview; optional wrist) — pixel coords refer to FRONT image.
+  The annotated front view shows the proposed TCP→approach→grasp route, NOT the full hand/arm swept volume.
 - experience_brief: library recoveries (when→prefer) + lessons (when→instead). READ them.
   Bake applicable general triggers into phase_order / diagnosis / plan (no brand hardcodes).
 - start_hints: identity gate result, named goal/place from perceive, neighbour prior tip
-- NO proprio contact yet (episode start) — predict from geometry / clutter / language + brief
+- start_hints.approach_geometry: current TCP pose, proposed approach/descent waypoints in world
+  meters, commanded orientation, maximum finger opening and current robot-part contacts.
+  These waypoints come from visual localization, not simulator object poses. Maximum finger
+  opening is NOT the total hand width. Palm/arm swept volume is NOT collision-checked.
 
 EmbodiedEvo / RSI analogy: this is start-of-episode reflection that becomes an episode prior.
 Invent predictive detail from experience_brief + the image — do not wait for stall contact.
@@ -655,8 +671,15 @@ Reply ONLY one JSON object (no markdown fences):
   "issue": one of {issues},
   "intervene": true if a pre-grasp clearance / adjust / relook is needed BEFORE approach,
   "predicted_risks": [] or subset of {risks},
+  "obstacle_assessment": {{"status":"clear"|"risk"|"uncertain",
+    "phase":"approach"|"descent"|"lift"|"transport"|"unknown",
+    "robot_part":"fingers"|"palm_or_wrist"|"arm"|"unknown",
+    "blocker_description":"visible blocker, or unknown",
+    "evidence":"image evidence and which proposed motion may be blocked; state occlusions",
+    "preferred_recovery":"none"|"relook"|"back_off"|"clear_reapproach"|"change_approach_yaw"}},
   "step1_must": one of {step1},
   "phase_order": ordered phases from {phases} — complete skeleton for the WHOLE language goal,
+  "task_todo": {{"items": [{{"id": "stable unique id", "target": "object named by the task", "goal": "desired final outcome for this object", "completion_condition": "what a current image must show to verify this outcome"}}]}},
   "diagnosis": one short sentence (what you foresee, citing brief triggers when used),
   "lesson": "" or one GENERAL qualitative sentence (NO numbers/units/object brand names),
   "plan": [] or ordered steps (max 3), each one of:
@@ -671,11 +694,18 @@ Reply ONLY one JSON object (no markdown fences):
 }}
 
 Rules:
+- task_todo MUST cover EVERY requested object/outcome in the language goal, with one ordered item per final object outcome. The harness adds nested progress checkpoints for target verification, secure grasp, lift clearance, transport, release height, and final placement/clearance within each item. Do not split these checkpoints into separate object items or claim they are complete. A planned close is not a grasp; a planned release is not successful placement.
+- Make each completion_condition a concrete observable question, e.g. "Is the butter inside the basket and no longer held by the gripper?" Require all task clauses.
 - READ experience_brief.recoveries and experience_brief.lessons first. For each applicable when→prefer / when→instead, bake it into phase_order (and diagnosis). Use GENERAL triggers only — no object-brand hardcodes in lesson text.
 - After EVERY place, include retreat (lift clear of container / leave rim) BEFORE the next approach. This is predictive clearance so the arm does not tip or scrape the place region — not something for mid-episode hard gates to invent later.
 - If language_goal names multiple objects / "both" / "and": phase_order MUST contain one complete cycle per object: (optional clear_neighbour) → approach → grasp → lift → place → retreat, then the next object… ending with a final retreat. Do not stop after the first place; do not omit the second place.
 - Mid-episode slow-think only fine-tunes; this start plan owns the long-horizon skeleton.
-- If a neighbour sits close enough that the OPEN gripper path or fingers may hit it before a clean bilateral grasp → set issue=blocked_by_neighbour, intervene=true, step1_must=push_aside (or clear_reapproach), phase_order MUST begin with clear_neighbour, and plan MUST LEAD with that step. Include blocker_px on the blocking body in the FRONT image when visible. Clearance requires start_hints.goal_id_confirmed=true; otherwise lead with relook. Your match assertion does not override the identity gate.
+- Assess the proposed approach and descent, not just whether space around the object looks empty.
+  Consider the open fingers, palm/wrist and visible arm; unseen geometry must remain uncertain.
+- If a neighbour may block the path, report the phase, robot part and visible blocker in
+  obstacle_assessment. Prefer clear_reapproach or change_approach_yaw before pushing an object.
+  A push requires a visible blocker_px and confirmed target identity. Identity uncertainty leads
+  with relook. A visual "clear" prediction is not a collision guarantee.
 - Identity mismatched or unconfirmed → step1_must=relook, lead plan with relook. Conditional experience lessons are not observations of current clutter.
 - Clear path + identity OK + single object → intervene=false, plan=[], step1_must=approach or none, phase_order=["approach","grasp","lift","place","retreat"].
 - Episode-only: do not invent library edits or scene-specific absolute yaw angles.
@@ -775,6 +805,25 @@ def validate_start_plan(
     lang_txt = lang if lang is not None else str(
         out.get('language_goal') or parsed.get('language_goal') or ''
     )
+    assessment = out.get('obstacle_assessment')
+    if assessment is None:
+        assessment = {'status': 'uncertain', 'phase': 'unknown', 'robot_part': 'unknown',
+                      'blocker_description': 'unknown', 'evidence': 'No clearance assessment supplied.',
+                      'preferred_recovery': 'relook'}
+    if not isinstance(assessment, dict):
+        errs.append('obstacle_assessment_not_object')
+        assessment = {}
+    allowed = {'status': {'clear', 'risk', 'uncertain'},
+               'phase': {'approach', 'descent', 'lift', 'transport', 'unknown'},
+               'robot_part': {'fingers', 'palm_or_wrist', 'arm', 'unknown'},
+               'preferred_recovery': {'none', 'relook', 'back_off', 'clear_reapproach', 'change_approach_yaw'}}
+    for key, values in allowed.items():
+        if assessment.get(key) not in values: errs.append('bad_obstacle_' + key)
+    for key in ('blocker_description', 'evidence'):
+        if not isinstance(assessment.get(key), str) or not assessment[key].strip():
+            errs.append('missing_obstacle_' + key)
+    out['obstacle_assessment'] = {key: assessment.get(key) for key in
+        (*allowed, 'blocker_description', 'evidence')}
     # predicted_risks
     risks_raw = out.get('predicted_risks')
     if risks_raw is None:
@@ -884,7 +933,9 @@ def call_start_plan(
     images = list(ctx.get('keyframe_paths') or [])[:4]
     if mode == 'codex':
         prompt = build_start_prompt(ctx)
-        raw, rec = call_codex(prompt, images, timeout_s=timeout_s)
+        raw, rec = call_codex(prompt, images, timeout_s=timeout_s, model=PERCEPTION_MODEL)
+        import task_todo
+        task_todo.initialize(raw.get('task_todo'), str(ctx.get('language_goal') or ''), 0)
         ok, errs, norm = validate_start_plan(raw, lang=str(ctx.get('language_goal') or ''))
         rec = dict(rec)
         rec['validate_ok'] = ok
