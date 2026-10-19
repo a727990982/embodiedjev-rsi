@@ -33,6 +33,20 @@ For early recovery the harness abandons pending advice, refreshes keypoints/iden
 
 ## Jev inputs and todo lifecycle
 
+Placement release includes a bounded settling wait of at most 20 physics steps,
+with open fingers and normal success/horizon checks on every step. It runs only
+on an actual `open_gripper` transition. The subsequent `retreat` target is at least
+6 cm above that release's recorded TCP height, without increasing the minimum on
+each retry. A normal release defers immediate Astra help to the next Jev visual
+review. Success still requires the official environment signal.
+
+Slow-think and early fallback share a physics-step/target/gripper checkpoint and
+a processed-history boundary. After recovery, including internal motion and
+relooks, old action streaks cannot trigger a duplicate automatic transaction at
+the same state. Failed requests are also recorded; a new state or an explicit Jev
+help request can retry within existing budgets. Recovery reaching a terminal state
+prevents further decision/action dispatch in the current loop iteration.
+
 `_current_observation` captures front RGB, optional wrist RGB, end-effector
 position/orientation, finger joint positions/opening, commanded open/closed state
 and individual contact booleans from one simulation step. `_jev_input` adds the

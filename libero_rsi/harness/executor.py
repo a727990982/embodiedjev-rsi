@@ -100,6 +100,7 @@ def execute(name, ns):
             return CLOSE_NOT_READY
         vision._clear_reapproach_if_aligned('pre_close')
         EP['closed'] = True; robot.grip(1, 20); EP['n_close'] += 1; EP['released'] = False
+        EP.pop('release_finalization', None)
         EP['tcp_at_close'] = robot.eef(); EP['opening_at_close'] = robot.opening()
         EP['closes'].append({'xyz': [round(float(x), 3) for x in robot.eef()], 'opening_after_close': round(robot.opening(), 4),
                              'both_contact': all(robot.contacts()), 'goal_id_confirmed': True})
@@ -116,12 +117,16 @@ def execute(name, ns):
         EP['grasp_secured_once'] = False
         PER['seen_held'] = False
         EP['todo_review_due'] = 'gripper_released'
+        if name == 'open_gripper':
+            grasping.settle_after_release()
     if name == 'reopen_and_retry':
         return 'reopened'  # Opening is separate from approaching a potentially stale point.
     try: tgt = np.asarray(dsl.evaluate(it['refpoint'], ns), float).reshape(3)
     except Exception as e:
         warn('refpoint', e, intent=name)
         return 'refpoint_error'
+    if name == 'retreat':
+        tgt = grasping.post_release_retreat_target(tgt)
     def ev(k, default):
         if k not in it: return default
         try: return float(dsl.evaluate(str(it[k]), ns))

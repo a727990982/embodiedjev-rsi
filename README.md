@@ -133,6 +133,25 @@ confirmed grasp. Candidate and executor checks reject closes above/off the grasp
 position, opening/reapproach motions that would discard a supported target grasp,
 and release before the destination waypoint. An unchanged failed motion requires
 a changed target/orientation or an executed back-off before retry.
+
+After an actual `open_gripper` release, the executor holds the fingers open and
+advances up to 20 additional physics steps so the object can settle. Existing
+terminal/horizon guards stop this wait immediately; a repeated open command does
+not restart it. The next normal check is Jev's current-image todo review, rather
+than an unconditional synchronous Astra call. If Jev selects `retreat`, its goal
+is at least 6 cm above the recorded release pose. That clearance height is fixed
+for this release, so retries do not keep raising it. `release_finalization` records
+the actual wait steps and clearance goal. Neither release nor waiting claims
+success: only the official environment check does.
+
+Automatic slow-think and early fallback share a handled-state checkpoint (physics
+step, active target and gripper command). They record both the request state and
+the state reached by recovery, including errors, and exclude pre-recovery action
+history from subsequent repetition checks. An unchanged physical state cannot
+trigger another automatic Astra transaction through the other path. New physical
+steps or targets allow fresh assessment, and explicit Jev help remains available
+within its existing budget. If a recovery reaches official success or the horizon,
+the loop stops before another model decision or forced intent.
 `lift`, `carry_to_place` and `lower_to_place` are offered only with a confirmed
 target grasp supported by current gripper contacts/opening. The executor repeats
 this check, including for forced actions, and never implicitly closes an empty

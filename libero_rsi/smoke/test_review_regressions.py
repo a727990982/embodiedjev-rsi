@@ -18,6 +18,7 @@ import coding_agent_slow as CAS
 import jev_experience as JX
 import task_todo as TODO
 import validate
+import recovery_tracking as TRACK
 from harness.state import Runtime
 
 MODULES = {path.stem: path for path in sorted((ROOT / 'harness').glob('*.py'))}
@@ -216,7 +217,7 @@ class RegressionTests(unittest.TestCase):
 
     def test_sync_slow_uses_codex_and_reports_failure(self):
         events, applied = [], []
-        scope = functions('_sync_slow', SLOW_JOB={}, P={'slow': 0}, MAX_SLOW=4, T=[10], dec=2,
+        scope = functions('_sync_slow', TRACK=TRACK, EP={}, SLOW_JOB={}, P={'slow': 0}, MAX_SLOW=4, T=[10], dec=2,
             _drain_orphan_slow_costs=lambda: None, _combo_rgb=lambda: ('image', None, 'depth'),
             _slow_ctx=lambda *a: '{}', _next_slow_job_id=lambda: 1,
             _prepare_slow_snapshot=lambda *a: {'coding_context': {'captured': True}},
@@ -228,6 +229,7 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(scope['_sync_slow']('descend', 'stalled', 'hard_stall')[0], 'ok')
             monitor.assert_called_once_with({'captured': True}, mode='codex')
         self.assertEqual(len(applied), 1)
+        scope['T'][0] += 1
         with patch.object(CAS, 'call_monitor', side_effect=RuntimeError('unavailable')):
             result, detail = scope['_sync_slow']('descend', 'stalled', 'hard_stall')
         self.assertTrue(result.startswith('sync_error:coding_agent:'))
@@ -237,7 +239,7 @@ class RegressionTests(unittest.TestCase):
 
     def test_fallback_refreshes_astra_then_plans_with_codex(self):
         events = []
-        scope = functions('do_fallback', P={'relook': 0}, MAX_RELOOK=4, PATCH={'offset': 1},
+        scope = functions('do_fallback','_fallback_once', TRACK=TRACK, EP={}, T=[10], P={'relook': 0}, MAX_RELOOK=4, PATCH={'offset': 1},
             _abandon_async_slow=lambda **kw: events.append('abandon'),
             do_relook=lambda reason: events.append('astra_perception') or 'relooked_matched',
             _sync_slow=lambda *a: events.append('codex_plan') or ('intervened', {'plan_done': ['adjust']}))
@@ -246,6 +248,7 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(result, 'intervened')
         self.assertEqual(detail['perception'], 'relooked_matched')
         scope['do_relook'] = lambda *a: 'relook_error'
+        scope['T'][0] += 1
         events.clear()
         self.assertEqual(scope['do_fallback']('stall'), ('fallback_perception_error', None))
         self.assertNotIn('codex_plan', events)

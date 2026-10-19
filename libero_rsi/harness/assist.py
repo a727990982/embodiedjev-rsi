@@ -3,6 +3,7 @@
 import numpy as np
 
 import jev_choice as JC
+import recovery_tracking as TRACK
 
 from . import observation, planning, recovery, vision
 from .config import ASK_ASTRA_NAMES, FAIL_RESULTS, GATE_JEV, GATE_JEV_COOLDOWN, MAX_FB, MAX_RELOOK, MAX_SLOW
@@ -195,6 +196,16 @@ def do_spectator_astra(intent, result, reason):
 
 def do_fallback(trig):
     """Refresh visual evidence through Astra, then ask Codex for the recovery plan."""
+    if TRACK.handled(EP, T[0]):
+        return 'recovery_already_handled', None
+    try:
+        return _fallback_once(trig)
+    finally:
+        TRACK.mark(EP, T[0])
+
+
+def _fallback_once(trig):
+    """One perception/planning transaction, covered by the shared checkpoint."""
     if P['relook'] >= MAX_RELOOK:
         esc = recovery._escape_identity_deadlock(f'fallback_relook_exhausted:{trig}')
         return f'escape_after_budget:{esc}', {**PATCH, 'escape': True, 'trigger': trig, 'escape_result': esc}
@@ -209,10 +220,12 @@ def do_fallback(trig):
 
 def fb_trigger():
     if not rt.FALLBACK or P['fb'] >= MAX_FB: return None
+    if TRACK.handled(EP, T[0]): return None
     # general stage-fail (shared debounce with slow-think via stage_fail_mark)
     sf = planning._stage_fail_grip_unchanged(consume=True)
     if sf: return sf
-    h = EP['hist']; th = EP['tcp_hist']
+    start = EP.get('recovery_history_mark', 0)
+    h = EP['hist'][start:]; th = EP['tcp_hist'][start:]
     if len(h) >= 4 and len(set(h[-4:])) == 1 and h[-1] not in ('finish',) and np.linalg.norm(th[-1] - th[-4]) < .01: return 'no_progress_same_intent'
     if len(h) >= 8 and len(set(h[-8:])) <= 2 and sum(a != b for a, b in zip(h[-8:], h[-7:])) >= 6: return 'intent_oscillation'
     if EP['n_close'] >= 3 and EP['n_close'] % 3 == 0 and EP.get('fb_close_mark') != EP['n_close']:

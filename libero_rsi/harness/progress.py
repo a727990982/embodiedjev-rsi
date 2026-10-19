@@ -41,6 +41,10 @@ def _retarget_todo():
     planning._abandon_async_slow('todo_target_changed')
     old_id = EP.get('todo_target_id')
     EP['todo_target_id'] = new_id
+    EP['recovery_history_mark'] = len(EP.get('hist', []))
+    EP.pop('recovery_handled_state', None)
+    if new_id is not None:
+        EP.pop('release_finalization', None)
     EP.pop('robot_geometry_advice', None)
     EP['recovery_history_start'] = len(EP.get('hist', []))
     EP['last_recovery_preparation'] = None
