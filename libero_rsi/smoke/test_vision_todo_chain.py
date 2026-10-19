@@ -111,7 +111,7 @@ class VisionTests(unittest.TestCase):
             ep = {'task_todo':todo(), 'vision_serial':0,
                   'hist':['lift','lift'], 'result_hist':['reached','at_target']}
             logged = []
-            scope = functions('_jev_input', FINE_STEPS=False, _motion_context=lambda:{}, _startup_obstacle_advice=lambda:{}, JO=JO, EP=ep, LANG='goal', T=[706],
+            scope = functions('_jev_input', _pose_menu_visible=lambda:False, FINE_STEPS=False, _motion_context=lambda:{}, _startup_obstacle_advice=lambda:{}, JO=JO, EP=ep, LANG='goal', T=[706],
                 DONE=[False], Image=Image, ep_dir=temp, log=lambda **kw:logged.append(kw),
                 _current_observation=lambda:(proprio(),{'front':np.zeros((2,2,3),dtype='uint8')}))
             state, _ = scope['_jev_input'](include_execution_history=True)

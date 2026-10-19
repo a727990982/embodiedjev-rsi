@@ -227,3 +227,16 @@ The regression suite executes selected production functions with environment/mod
 See [the earlier call-chain audit](libero_rsi/reviews/call_chain_audit.md) for verified wiring, fixed regressions, and remaining environment requirements. `test_runtime_chain.py` executes the top-level runner with fake services; it does not test LIBERO physics or robot success.
 
 `astra_calls` counts perception/identity replies; `planning_calls` counts start/slow-planning replies. `jev_calls` counts acting decisions, `gate_jev_calls` counts spectator decisions, and `todo_review_calls` counts separate Jev progress-review requests; `todo_review_model` records their model. Sum these three Jev counters for successful Jev requests. A review requests one Choice answer per todo item, not one HTTP request per item. Codex CLI does not provide measured usage in this adapter, so its zero-valued cost fields are placeholders, not evidence of free calls.
+
+## Optional pose menu
+
+`POSE_MENU=1` adds in-place yaw, side/top align and return-home actions. Use
+`POSE_MENU_KINDS=rotate`, `align` or `home` (comma-separated) to select families,
+or load `libs/ee_pg_pose_menu_lib.json`. These controls default off and preserve
+the gripper command. Align uses current visual estimates, not simulator object
+poses. Rotation/home require orientation convergence in the measured-motion
+servo; ordinary translation keeps its positional stopping rule. Historical
+outcomes appear in `motion_context.pose_action_outcome`. A failed home action
+retains its attempted command overrides instead of claiming the home pose was
+reached. Empty-hand fine/pose motion after release preserves placement review;
+Jev still verifies final placement and whether another grasp is necessary.

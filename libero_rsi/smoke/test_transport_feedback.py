@@ -33,7 +33,7 @@ def fixture():
         TRANSPORT_INTENTS=TRANSPORT, GRASP_FAILED=FAILED, OPEN_MAX=0.08, MF=MF,
         CLOSE_NOT_READY='close_not_executed:not_at_grasp', MOTION_RECOVERIES={'back_off','clear_reapproach','change_approach_yaw'},
         namespace=lambda:(ns,{}), FALLBACK=True, P={'slow':0,'relook':0}, MAX_SLOW=4, MAX_RELOOK=4,
-        FINE_STEPS=False, _motion_context=lambda:{}, _startup_obstacle_advice=lambda:{},
+        _pose_menu_visible=lambda:False, FINE_STEPS=False, _motion_context=lambda:{}, _startup_obstacle_advice=lambda:{},
         ASK_ASTRA_NAMES={'ask_astra','consult_astra'}, T=[100], DONE=[False],
         contacts=lambda:sensor['contacts'], opening=lambda:sensor['opening'],
         goal_id_confirmed=lambda:sensor['identity'], np=np, dsl=dsl, JO=JO,

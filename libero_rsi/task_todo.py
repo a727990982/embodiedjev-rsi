@@ -109,7 +109,8 @@ def apply_review(todo, raw, step):
 
 
 def refresh_progress(todo, target_id, step, *, identity_confirmed, grasp_ready,
-                     gripper_closed, intent=None, result=None, waypoints_changed=False):
+                     gripper_closed, intent=None, result=None, waypoints_changed=False,
+                     preserve_placement_review=False):
     """Refresh the active object's checkpoints from executor feedback and sensors.
 
     Motion checkmarks are achieved waypoints within the current grasp, not claims
@@ -127,7 +128,7 @@ def refresh_progress(todo, target_id, step, *, identity_confirmed, grasp_ready,
             and not gripper_closed and progress['current_grasp_confirmed']
             and stages['carry_to_destination']['status'] == 'done'):
         progress['awaiting_placement_review'] = True
-    elif intent is not None and intent not in ('retreat', 'relook', 'ask_astra',
+    elif not preserve_placement_review and intent is not None and intent not in ('retreat', 'relook', 'ask_astra',
                                                'consult_astra', 'finish'):
         progress['awaiting_placement_review'] = False
     if not identity_confirmed or ready:

@@ -106,6 +106,18 @@ class StageTests(unittest.TestCase):
         self.assertEqual(statuses(done)['place_and_clear'], 'done')
         self.assertEqual(done['items'][1]['progress'], todo()['items'][1]['progress'])
 
+    def test_empty_hand_fine_or_pose_motion_keeps_placement_review(self):
+        t=refresh(refresh(todo(),179,'lift','reached'),190,'carry_to_place','reached')
+        t=refresh(t,205,'open_gripper','at_target',held=False)
+        for action in ('fine_z_plus_1cm','return_home','rotate_yaw_plus_15'):
+            updated=TODO.refresh_progress(t,'cheese',210,identity_confirmed=True,
+                grasp_ready=False,gripper_closed=False,intent=action,result='reached',
+                preserve_placement_review=True)
+            self.assertTrue(progress(updated)['awaiting_placement_review'])
+            self.assertEqual(progress(updated)['next_stage'],'place_and_clear')
+        reapproach=refresh(t,210,'move_above_object','reached',held=False)
+        self.assertFalse(progress(reapproach)['awaiting_placement_review'])
+
     def test_placement_waiting_for_clearance_does_not_request_regrasp(self):
         t = refresh(refresh(todo(), 179, 'lift', 'reached'), 190, 'carry_to_place', 'reached')
         t = refresh(t, 205, 'open_gripper', 'at_target', held=False)
@@ -156,7 +168,7 @@ class StageTests(unittest.TestCase):
               'grasp_confirm': True, 'grasp_secured_once': True}
         sensors = {'contacts': (True, True)}
         saved = []
-        scope = functions('_refresh_task_progress', '_transport_grasp_ready',
+        scope = functions('_refresh_task_progress', '_transport_grasp_ready', LIB={'intents':[]},
             EP=ep, TODO=TODO, T=[166], GOAL_TARGET={'rev': 1}, OPEN_MAX=.08,
             goal_id_confirmed=lambda: True,
             contacts=lambda: sensors['contacts'], opening=lambda: .0555,
