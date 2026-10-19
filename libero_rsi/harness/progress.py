@@ -46,6 +46,7 @@ def _retarget_todo():
     if new_id is not None:
         EP.pop('release_finalization', None)
     EP.pop('robot_geometry_advice', None)
+    EP.pop('last_motor', None)
     EP['recovery_history_start'] = len(EP.get('hist', []))
     EP['last_recovery_preparation'] = None
     EP['last_failed_motion'] = None

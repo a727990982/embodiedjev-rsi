@@ -5,13 +5,60 @@ import numpy as np
 import dsl_libero as dsl
 import fine_steps as FS
 import motion_feedback as MF
+import cartesian_policy as CP
+import jev_choice as JC
 
 from . import assist, grasping, observation, pose, recovery, robot, vision
 from .config import ASK_ASTRA_NAMES, CLOSE_NOT_READY, GRASP_FAILED, MAX_RELOOK, MOTION_RECOVERIES, TRANSPORT_INTENTS
 from .state import DONE, EP, GOAL_ID, ID_EVENTS, P, PER, SHAPE, T, log, nonfatal, rt, warn
 
 
-def execute(name, ns):
+def execute_policy(name, ns):
+    """Acting path: intent already chosen, ask motor Choices on fresh images.
+
+Recovery, pose and fine-step operations retain their explicitly described
+executors. No network call is hidden inside the low-level servo.
+"""
+    it = {i['name']: i for i in rt.LIB['intents']}[name]
+    if it.get('action', 'move') != 'move' or name in MOTION_RECOVERIES:
+        return execute(name, ns)
+    if DONE[0]:
+        return 'horizon_or_done'
+    ns, _ = observation.namespace()
+    blocked = observation._action_block_reason(name, it, ns)
+    if blocked or (name in TRANSPORT_INTENTS and not observation._transport_grasp_ready()):
+        return execute(name, ns)  # Preserve the existing refusal/relook behavior.
+    # Reopen is intentionally separate from re-approach in the existing executor,
+    # even for old libraries whose refpoint still names an approach waypoint.
+    target = (robot.eef().copy() if name == 'reopen_and_retry' else
+              np.asarray(dsl.evaluate(it['refpoint'], ns), float).reshape(3))
+    if name == 'retreat':
+        target = grasping.post_release_retreat_target(target)
+    state, assets = observation._jev_input(include_execution_history=True)
+    context, questions = CP.motor_request(name, it['definition'], robot.eef(), target,
+                                         it.get('fingers', 'keep'))
+    state['motor_context'] = context
+    EP['motor_calls'] = EP.get('motor_calls', 0) + 1
+    log(t=T[0], jev_motor_request=context, questions=questions,
+        observation_serial=EP['vision_serial'])
+    answers, latency = JC.choose_questions(state, questions, assets=assets)
+    motor = CP.motor_choices(answers)
+    log(t=T[0], jev_motor_response=answers, latency_s=latency, intent=name)
+    EP['last_motor'] = {'intent': name, 'motor': motor, 'reference_target_xyz_m': target.tolist(),
+                        'observation_step': T[0]}
+    # A motor selection must not silently override grasp-preserving intent gates.
+    closed = bool(EP.get('closed'))
+    requested_closed = closed if context['requested_fingers'] == 'stay' else context['requested_fingers'] == 'close'
+    selected_closed = closed if motor['fingers'] == 'stay' else motor['fingers'] == 'close'
+    if selected_closed != requested_closed:
+        EP['last_motor']['result'] = 'motor_not_executed:gripper_intent_conflict'
+        return EP['last_motor']['result']
+    result = execute(name, ns, motor=motor, reference=target)
+    EP['last_motor']['result'] = result
+    return result
+
+
+def execute(name, ns, *, motor=None, reference=None):
     it = {i['name']: i for i in rt.LIB['intents']}[name]
     act = it.get('action', 'move'); fing = it.get('fingers', 'keep')
     if act in ASK_ASTRA_NAMES or name in ASK_ASTRA_NAMES:
@@ -121,7 +168,8 @@ def execute(name, ns):
             grasping.settle_after_release()
     if name == 'reopen_and_retry':
         return 'reopened'  # Opening is separate from approaching a potentially stale point.
-    try: tgt = np.asarray(dsl.evaluate(it['refpoint'], ns), float).reshape(3)
+    try: tgt = (np.asarray(reference, float).reshape(3) if reference is not None else
+                np.asarray(dsl.evaluate(it['refpoint'], ns), float).reshape(3))
     except Exception as e:
         warn('refpoint', e, intent=name)
         return 'refpoint_error'
@@ -138,7 +186,13 @@ def execute(name, ns):
     if np.linalg.norm(tgt - robot.eef()) < .006:
         vision._clear_reapproach_if_aligned('at_target')
         return 'at_target'
-    r = robot.servo(tgt, 1 if EP['closed'] else -1, gain)
+    if motor is None:
+        r = robot.servo(tgt, 1 if EP['closed'] else -1, gain)
+    else:
+        r = robot.servo(tgt, 1 if EP['closed'] else -1, gain,
+                        max_steps=CP.BLOCK_STEPS, motor=motor,
+                        speed_m_s=CP.CONTACT_SPEED_M_S if name in ('descend_to_grasp', 'lower_to_place')
+                        else CP.FREE_SPEED_M_S)
     if r in ('stalled', 'timeout'):
         EP.setdefault('blocked_motions', {})[name] = {
             'target_xyz_m': tgt.tolist(), 'orientation_deg': vision._motion_orientation()}

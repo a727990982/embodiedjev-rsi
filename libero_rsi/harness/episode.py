@@ -248,10 +248,11 @@ def run_decision_loop(run):
             it, probs, _ = JC.choose(jev_state, JO.INSTRUCTIONS,
                                      criteria, assets=assets, meta=rt.META)
             run['jev_calls'] += 1
-        CUR['intent'] = it; r = executor.execute(it, ns); rt.dec += 1
+        CUR['intent'] = it; r = executor.execute_policy(it, ns); rt.dec += 1
         progress._refresh_task_progress(it, r)
         EP['last_result'] = r
-        EP['todo_review_due'] = f'{it}:{r}'
+        if r != 'in_progress':
+            EP['todo_review_due'] = f'{it}:{r}'
         EP['n_same'] = EP['n_same'] + 1 if it == EP['prev'] else 1; EP['prev'] = it; EP['step'] += 1
         EP['hist'].append(it); EP['tcp_hist'].append(robot.eef())
         EP['result_hist'].append(r); EP['grip_hist'].append(bool(EP['closed']))
@@ -267,7 +268,7 @@ def run_decision_loop(run):
         if len(EP['grip_hist']) >= 2 and EP['grip_hist'][-1] != EP['grip_hist'][-2]:
             EP['stage_fail_mark'] = 0
         log(dec=rt.dec, t=T[0], intent=it, forced=forced, result=r, facts=f, probabilities=probs)
-        if r != 'finish' and not DONE[0] and T[0] < HORIZON:
+        if r not in ('finish', 'in_progress') and not DONE[0] and T[0] < HORIZON:
             event = _request_help(it, r)
             if event:
                 run['slow_events'].append(event)
@@ -305,7 +306,10 @@ def finish_episode(run, end):
         EP['task_todo'] = TODO.official_completion(EP['task_todo'], T[0])
         progress._save_task_todo('official_success')
     res = run['res']
-    res.update(success=bool(DONE[0]), end_reason=end, env_steps=T[0], decisions=rt.dec, jev_calls=run['jev_calls'], astra_calls=P['astra_calls'],
+    res.update(success=bool(DONE[0]), end_reason=end, env_steps=T[0], decisions=rt.dec,
+               jev_calls=run['jev_calls'] + EP.get('motor_calls', 0),
+               jev_intent_calls=run['jev_calls'], jev_motor_calls=EP.get('motor_calls', 0),
+               acting_policy='intent_then_cartesian_choices', astra_calls=P['astra_calls'],
                astra_cost_usd=round(P['astra_cost'], 4), planning_calls=P['planning_calls'],
                planning_cost_usd=round(P['planning_cost'], 4), relooks=P['relook'], fallback_events=run['fb_events'], slow_think_events=run['slow_events'],
                slow_interventions=P['slow'], gate_jev_calls=EP.get('gate_jev_calls', 0), final_patch=PATCH, fallback_lessons=FB_LESSONS, learned_shape=RSHAPE,

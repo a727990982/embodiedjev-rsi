@@ -77,6 +77,8 @@ def _jev_input(*, include_execution_history=False):
     proprio, frames = _current_observation()
     state, assets = JO.build_state(rt.LANG, EP['task_todo'], proprio, frames, T[0], DONE[0])
     state['motion_context'] = _motion_context()
+    if EP.get('last_motor'):
+        state['motion_context']['last_motor_decision'] = EP['last_motor']
     if pose._pose_menu_visible():
         state['motion_context']['pose_action_outcome'] = EP.get('pose_menu_note')
     if FINE_STEPS:
@@ -308,7 +310,9 @@ def _candidate_execution(menu, ns, state):
                     'commanded_tcp_target_m': target.tolist(), 'requested_delta_m': (target-tcp).tolist(),
                     'commanded_orientation_deg': vision._motion_orientation(shape), 'position_tolerance_m': .006,
                     'within_tolerance_at_observation': within,
-                    'branch': 'At execution, return at_target if within tolerance; otherwise attempt servo. Opening fingers first may change the pose.'})
+                    'branch': 'At execution, ask Jev for XYZ signs and fingers, then return at_target if within tolerance; '
+                              'otherwise attempt up to eight servo steps toward the waypoint. in_progress means '
+                              'the waypoint is not reached; the next decision may continue it. Opening fingers first may change the pose.'})
             if name == 'move_above_object':
                 d['conditional_effects'] = ['Reaching the approach waypoint only prepares the next decision; no descent or grasp is tested.']
             else:
