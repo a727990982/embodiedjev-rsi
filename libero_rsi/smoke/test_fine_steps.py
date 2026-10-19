@@ -194,7 +194,7 @@ class FineStepTests(unittest.TestCase):
         self.assertEqual(calls[0]['tol'], FS.FINE_STEP_TOL_M)
         self.assertEqual(calls[0]['max_steps'], FS.FINE_STEP_MAX_STEPS)
         self.assertTrue(ep['closed'])
-        self.assertEqual(shape['yaw'], None)
+        self.assertEqual(shape, {'tilt':12.0,'tdir':4.0,'yaw':25.0})
         self.assertEqual(cleared, ['fine_step'])
         rep = ep['last_fine_step']
         self.assertEqual(rep['result'], 'reached')
@@ -222,7 +222,7 @@ class FineStepTests(unittest.TestCase):
         result = scope['_execute_fine_step'](tiny, _ns(tcp0))
         self.assertEqual(result, 'at_target')
         self.assertEqual(calls, [])
-        self.assertEqual(shape['yaw'], 25.0)
+        self.assertEqual(shape, {'tilt':12.0,'tdir':4.0,'yaw':25.0})
         self.assertEqual(ep['last_fine_step']['result'], 'at_target')
         self.assertEqual(ep['last_fine_step']['ee_xyz_m'], [0.1, -0.02, 0.3])
 
@@ -258,27 +258,21 @@ class FineStepTests(unittest.TestCase):
         self.assertEqual(scope['_execute_fine_step'](it, _ns(tcp0)), 'refpoint_error')
         self.assertEqual(calls, [])
 
-    def test_harness_wires_flag_before_close_and_reports_in_facts(self):
-        src = HARNESS.read_text()
-        tree = ast.parse(src)
-        found = False
-        for node in tree.body:
-            if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == 'FINE_STEPS':
-                self.assertIn('apply_fine_steps', ast.dump(node))
-                found = True
-        self.assertTrue(found)
-        self.assertEqual(src.count('apply_fine_steps'), 1)
-        self.assertIn('FINE_STEPS = FS.enabled_flag()', src)
-        self.assertIn("'fine_unit': FS.FINE_UNIT_M", src)
-        facts = src.split('def facts(ns, preds):', 1)[1].split('\ndef ', 1)[0]
-        self.assertIn('FS.fine_step_fact(FINE_STEPS, EP.get(\'last_fine_step\'))', facts)
-        execute = src.split('def execute(name, ns):', 1)[1].split('\ndef ', 1)[0]
-        self.assertLess(execute.index("if act == 'fine_step'"), execute.index("if fing == 'close'"))
-        body = src.split('def _execute_fine_step', 1)[1].split('\ndef ', 1)[0]
-        self.assertIn('servo(', body)
-        self.assertIn('FINE_STEP_TOL_M', body)
-        self.assertNotIn('.006', body)
-        self.assertIn("if FINE_STEPS or EP.get('fine_step_events'):", src)
+    def test_feedback_reaches_current_image_payload(self):
+        import tempfile
+        import jev_observation as JO
+        from test_transport_feedback import fixture
+        scope,ep,_,_=fixture()
+        ep['last_fine_step']=FS.fine_step_report('fine_x_plus_5mm','reached',[.005,0,0],[.005,0,0],False)
+        scope.update(FINE_STEPS=True,FS=FS)
+        scope['_current_observation']=lambda:({key:0 for key in JO.FIELDS},
+                                              {'front':np.zeros((2,2,3),dtype='uint8')})
+        with tempfile.TemporaryDirectory() as temp:
+            scope['ep_dir']=temp
+            state,assets=scope['_jev_input']()
+        self.assertEqual(state['motion_context']['last_fine_step'],ep['last_fine_step'])
+        self.assertNotIn('observed_facts',state)
+        self.assertTrue(assets)
 
 
 if __name__ == '__main__':

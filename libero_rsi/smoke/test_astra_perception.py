@@ -32,7 +32,7 @@ class CodexVisionTests(unittest.TestCase):
                 scope = functions('perceive', 'verify_grasp_identity',
                     rgbd=lambda: (rgb, dep), np=np, Image=Image, time=time,
                     obs={'robot0_eye_in_hand_image': rgb.copy()}, ep_dir=temp,
-                    LANG='put butter in basket', S=512, T=[3], ASTRA_EFFORT='xhigh',
+                    LANG='put butter in basket', _active_language_goal=lambda: 'put butter in basket', S=512, T=[3], ASTRA_EFFORT='xhigh',
                     P={'astra_cost': 0, 'astra_calls': 0, 'last_astra_wall': 0},
                     log=lambda **kw: logs.append(kw))
                 with patch.object(CAS, '_resolve_codex_bin', return_value='/fake/codex'), \

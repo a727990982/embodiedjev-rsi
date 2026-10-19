@@ -1,8 +1,8 @@
 {
  "version": "ee_pg_fine_steps_v1",
  "note": "Overlay menu of bounded world-axis translations. Not a pick-and-place policy. Enable with FINE_STEPS=1 so the episode library gains these intents. Do not point an experiment at this file alone. Sizes are five millimetres (0.5*fine_unit), one centimetre (fine_unit), and three centimetres (3*fine_unit), with fine_unit = 0.01 m. Servo tolerance is 2 mm so the smallest step is not swallowed by the 6 mm move early-out.",
- "intent_instructions": "Fine-step menu: intents named fine_* keep the current gripper state and servo along one world axis by five millimetres, one centimetre, or three centimetres. Use one when the grasp or place estimate is only slightly off. After it runs, read observed_facts.last_fine_step for the servo result and the new end-effector position.",
- "merge_instructions": "Fine-step menu: intents named fine_* keep the current gripper state and servo along one world axis by five millimetres, one centimetre, or three centimetres. Use one when the grasp or place estimate is only slightly off. After it runs, read observed_facts.last_fine_step for the servo result and the new end-effector position.",
+ "intent_instructions": "Fine-step menu: intents named fine_* keep the current gripper state and servo along one world axis by five millimetres, one centimetre, or three centimetres. Use one when the grasp or place estimate is only slightly off. After it runs, read motion_context.last_fine_step for the servo result and the new end-effector position.",
+ "merge_instructions": "Fine-step menu: intents named fine_* keep the current gripper state and servo along one world axis by five millimetres, one centimetre, or three centimetres. Use one when the grasp or place estimate is only slightly off. After it runs, read motion_context.last_fine_step for the servo result and the new end-effector position.",
  "intents": [
   {
    "id": "fine_x_plus_5mm@v0",

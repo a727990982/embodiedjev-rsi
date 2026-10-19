@@ -14,37 +14,29 @@ Policy-visible signals (documented in ADAPTER.md):
          On stall with identity confirmed: must update the shared target (raise/shift/relook-refresh); relook executes fresh perception.
   success: official env (BDDL check_success) -> done flag. Binary only, ends the episode.
 No simulator object/target ground-truth poses reach the policy.
-Jev state includes experience_brief: short actionable recoveries (when→prefer) + relevant lessons (when→instead), not a full prose dump; general triggers only.
-Codex planning help: the existing ask_astra/consult_astra intent names request Codex; hard rules and a spectator Jev may request synchronous help on distress signals; all share MAX_SLOW.
+Jev receives task todo, same-frame images/proprioception, measured motion/contact feedback and historical startup obstacle advice.
+Close/release applicability is checked by the executor; unchanged failed waypoints require recovery.
+Codex planning help: the existing ask_astra/consult_astra intent names request Codex; hard rules and a spectator Jev may request synchronous help on distress signals; general help shares MAX_SLOW; one additional motion-obstruction diagnosis is available after exhaustion (if MAX_SLOW > 0).
 Codex handles episode-start global planning and sync/async slow-think. Astra, invoked through Codex CLI, handles visual perception and identity verification; Jev selects each intent. Model roles are fixed.
-Plan JSON is persisted as start_plan.json; mid-episode slow-think fine-tunes the episode plan.
+Start planning includes task_todo; Astra reviews outcome progress on current images. Jev selects applicable actions for the active objective.
 After close_gripper: proprio+lift grasp confirm (log grasp_confirm); secured → lift, suppress push_aside/local_deadend undo.
 Hard local-deadend rule: repeated local stall family (push_aside/clear_reapproach/raise_redescend/lateral) without progress, or push_aside episode/approach cap → retreat + global front relook + SYNCHRONOUS slow-think replan (Codex slow-think); Jev motion held until plan applied.
 Place-phase: after carry_to_place reached, N consecutive lower_to_place stall/timeout (MAX_PLACE_LOWER_STALL) or M lift↔lower cycles (MAX_PLACE_LIFT_LOWER_CYCLES) while TCP/held XY is over the place region → force open_gripper (log place_force_release); avoid endless lift↔lower thrash over basket.
-Fine steps (FINE_STEPS=1, default off): merge libs/ee_pg_fine_steps.json into the loaded menu before validation. Each option servos at most 3 cm along one world axis, keeps the gripper command, and reports the servo result plus the new end-effector position in observed_facts.last_fine_step. Unset or 0 leaves the loaded library unchanged.
 Freshness/isolation: each async slow-think job has a unique job_id + private result_box (abandoned workers cannot overwrite a newer job); after keypoint refresh, close is blocked until TCP re-approaches the new grasp XY; recovery mutations recompute namespace/facts before execute and spectator.
 """
 import os, sys, json, time, gc, re, threading, queue
 os.environ.setdefault('MUJOCO_GL', 'egl'); os.environ.setdefault('PYOPENGL_PLATFORM', 'egl')
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
-# Optional Jev client from a larger bench checkout.
-for _extra in (
-    os.path.join(_HERE, 'bench_common'),
-    os.path.abspath(os.path.join(_HERE, '..', '..', 'bench', 'common')),
-):
-    if os.path.isdir(_extra):
-        sys.path.insert(0, _extra)
-import numpy as np
-try:
-    import jev_choice as JC
-except ModuleNotFoundError as ex:
-    if ex.name != 'jev_choice':
-        raise
-    raise SystemExit(f'Missing external client {ex.name}. See libero_rsi/ADAPTER.md; '
-                     'provide the bench clients via PYTHONPATH or libero_rsi/bench_common/.') from ex
-import dsl_libero as dsl
+# The bundled TypeSafe client is part of this checkout; no external text-only
+# jev_choice module may shadow the production image transport.
+import jev_choice as JC
+import jev_observation as JO
+import task_todo as TODO
+import motion_feedback as MF
 import fine_steps as FS
+import numpy as np
+import dsl_libero as dsl
 from validate import validate
 import jev_experience as JX
 from libero.libero import benchmark, get_libero_path
@@ -70,9 +62,14 @@ PLACE_CLEARANCE_DEFAULT = float(os.environ.get('PLACE_CLEARANCE_DEFAULT', '0.05'
 ASTRA_EFFORT = os.environ.get('ASTRA_EFFORT', 'xhigh')  # Astra perception/identity effort through Codex CLI
 SLOW_MIN_GAP_S = float(os.environ.get('SLOW_MIN_GAP_S', '5'))  # gap between completed Codex planning calls (unless critical)
 STAGE_FAIL_N = int(os.environ.get('STAGE_FAIL_N', '3'))  # consecutive timeout/stall + unchanged gripper -> sync slow-think
-FAIL_RESULTS = frozenset({'timeout', 'stalled'})
+TRANSPORT_INTENTS = frozenset({'lift', 'carry_to_place', 'lower_to_place'})
+GRASP_FAILED = 'grasp_failed:transport_not_executed'
+CLOSE_NOT_READY = 'close_not_executed:not_at_grasp'
+MOTION_RECOVERIES = frozenset({'back_off', 'clear_reapproach', 'change_approach_yaw'})
+FAIL_RESULTS = frozenset({'timeout', 'stalled', GRASP_FAILED, CLOSE_NOT_READY} |
+                         {f'{name}_not_executed:grasp_unconfirmed' for name in TRANSPORT_INTENTS})
 OPEN_MAX = 0.08  # Panda gripper spec (robot spec, not scene)
-FINE_STEPS = FS.enabled_flag()  # merge bounded fine-step intents; unset/0 leaves the loaded library unchanged
+FINE_STEPS = FS.enabled_flag()
 LIB = json.load(open(LIBP))
 if FINE_STEPS:
     FS.apply_fine_steps(LIB, True)
@@ -104,6 +101,12 @@ def _ensure_ask_astra_intents(lib):
     if 'ask_astra' not in instr:
         lib['intent_instructions'] = instr + tip
 _ensure_ask_astra_intents(LIB)
+for _name in sorted(MOTION_RECOVERIES):
+    if _name not in {it['name'] for it in LIB['intents']}:
+        LIB['intents'].append({'id': _name + '@v0', 'name': _name,
+            'action': 'move', 'fingers': 'keep', 'refpoint': 'tcp',
+            'definition': 'Bounded motion recovery using current observations.',
+            'status': 'hypothesis', 'evidence': 'executor recovery'})
 ep_dir = os.path.join(OUT, f'{suite}_t{tid}_i{init_i}'); os.makedirs(ep_dir, exist_ok=True)
 logf = open(os.path.join(ep_dir, 'decisions.jsonl'), 'w')
 def log(**k): logf.write(json.dumps(k, default=lambda o: np.asarray(o).round(4).tolist()) + '\n'); logf.flush()
@@ -116,7 +119,7 @@ def make_env():
     for a in range(4):
         try:
             e = OffScreenRenderEnv(bddl_file_name=os.path.join(get_libero_path('bddl_files'), task.problem_folder, task.bddl_file),
-                                   camera_heights=S, camera_widths=S, camera_depths=True)
+                                   camera_heights=S, camera_widths=S, camera_depths=True, horizon=HORIZON)
             e.seed(0); e.reset(); o = e.set_init_state(b.get_task_init_states(tid)[init_i]); return e, o
         except Exception as ex:
             last = ex; gc.collect(); time.sleep(3 + 3 * a)
@@ -140,28 +143,35 @@ def diag():  # DIAGNOSTIC ONLY (never shown to policy): per-step BDDL goal predi
     if DIAGF: DIAGF.write(json.dumps(out) + '\n'); DIAGF.flush()
 # always snapshot start poses for end-of-episode moved_most (diagnostic only)
 diag()
-VIDP = os.environ.get('VIDEO'); VID = None; CUR = {'intent': '-', 'fb': '', 'fb_t': -999, 'slow': '', 'slow_t': -999}
-if VIDP:
+def _start_video(path):
     import subprocess
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    return subprocess.Popen(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '1024x572', '-r', '20', '-i', '-',
+                             '-c:v', 'libx264', '-threads', '1', '-pix_fmt', 'yuv420p', '-crf', '26', '-preset', 'medium', '-movflags', '+faststart', path], stdin=subprocess.PIPE)
+
+
+VIDP = os.environ.get('VIDEO', os.path.join(ep_dir, 'episode.mp4')); VID = None; CUR = {'intent': '-', 'fb': '', 'fb_t': -999, 'slow': '', 'slow_t': -999}
+if VIDP:
     from PIL import Image as _I, ImageDraw as _D
-    VID = subprocess.Popen(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '1024x572', '-r', '20', '-i', '-',
-                            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '26', '-preset', 'medium', '-movflags', '+faststart', VIDP], stdin=subprocess.PIPE)
+    VID = _start_video(VIDP)
 def vid_frame(a):
     im = _I.new('RGB', (1024, 572)); im.paste(_I.fromarray(obs['agentview_image'][::-1]), (0, 0))
     if 'robot0_eye_in_hand_image' in obs: im.paste(_I.fromarray(obs['robot0_eye_in_hand_image'][::-1]).resize((512, 512)), (512, 0))
     d = _D.Draw(im); g = 'CLOSED' if a[6] > 0 else 'OPEN'
     op = float(obs['robot0_gripper_qpos'][0] - obs['robot0_gripper_qpos'][1])
-    d.text((6, 516), f"step {T[0]}/600   intent: {CUR['intent']}   gripper cmd: {g}  opening {op*100:.1f}cm   {'SUCCESS' if DONE[0] else ''}", fill=(255, 255, 0))
+    d.text((6, 516), f"step {T[0]}/{HORIZON}   intent: {CUR['intent']}   gripper cmd: {g}  opening {op*100:.1f}cm   {'SUCCESS' if DONE[0] else ''}", fill=(255, 255, 0))
     if T[0] - CUR['fb_t'] < 60: d.text((6, 536), f"FALLBACK: {CUR['fb']}"[:170], fill=(255, 80, 80))
     elif T[0] - CUR['slow_t'] < 60: d.text((6, 536), f"SLOW: {CUR['slow']}"[:170], fill=(80, 200, 255))
     d.text((6, 554), 'left: agentview   right: wrist cam', fill=(180, 180, 180))
     VID.stdin.write(im.tobytes())
 def step(a):
     global obs
+    if DONE[0] or T[0] >= HORIZON:
+        return
     obs, r, done, info = env.step(np.clip(a, -1, 1)); T[0] += 1
     if VID: vid_frame(a)
     if DIAGF and globals().get('EP', {}).get('n_close', 0) > 0: diag()
-    if done: DONE[0] = True
+    if env.env._check_success(): DONE[0] = True
 for _ in range(10): step([0, 0, 0, 0, 0, 0, -1])
 
 # ---- tactile proxy ----
@@ -181,6 +191,20 @@ def contacts():
             if f in FING['L']: l = True
             if f in FING['R']: r = True
     return l, r
+
+# Robot geometry names describe our own sensor locations, never the touched body.
+ROBOT_PARTS = {}
+for _g in range(m.ngeom):
+    _body = (m.body_id2name(m.geom_bodyid[_g]) or '').lower()
+    if _g in FING['L']: ROBOT_PARTS[_g] = 'left_finger'
+    elif _g in FING['R']: ROBOT_PARTS[_g] = 'right_finger'
+    elif _body.startswith('gripper0'): ROBOT_PARTS[_g] = 'palm_or_wrist'
+    elif _body.startswith('robot0'): ROBOT_PARTS[_g] = 'arm'
+
+def robot_contacts():
+    pairs = [(sim.data.contact[i].geom1, sim.data.contact[i].geom2)
+             for i in range(sim.data.ncon)]
+    return MF.contact_summary(pairs, ROBOT_PARTS)
 
 def camera():
     cid = m.camera_name2id('agentview'); return sim.data.cam_xpos[cid].copy(), sim.data.cam_xmat[cid].reshape(3, 3).copy(), 0.5 * S / np.tan(np.deg2rad(m.cam_fovy[cid]) / 2)
@@ -215,6 +239,13 @@ def set_goal_id(confirmed, source, detail=None):
     return ok
 def goal_id_confirmed():
     return GOAL_ID.get('confirmed') is True
+def _active_language_goal():
+    item = TODO.active_item(globals().get('EP', {}).get('task_todo'))
+    if item is None:
+        return LANG
+    return f"{LANG}\nCurrent TODO target: {item['target']}. Current objective: {item['goal']}. Localize and verify ONLY this target."
+
+
 def perceive(context=None, phase=None):
     """Use Codex CLI to ask Astra for visual keypoints at start and on relook."""
     import coding_agent_slow as CAS
@@ -230,7 +261,7 @@ def perceive(context=None, phase=None):
         _PILImage.fromarray(wrist[::-1]).save(wrist_frame)
         images.append(wrist_frame)
     parsed, rec = CAS.harness_call_perceive(
-        lang=LANG, phase=ph, image_paths=images, context=context,
+        lang=_active_language_goal(), phase=ph, image_paths=images, context=context,
         img_size=S, mode='codex', effort=ASTRA_EFFORT)
     P['astra_cost'] += rec['cost_usd']; P['astra_calls'] += 1; P['last_astra_wall'] = time.time()
     log(t=T[0], perception=True, phase=ph, backend=rec.get('backend'),
@@ -392,7 +423,7 @@ def verify_grasp_identity(p, rgb, phase='perceive_start_verify'):
     r = 14; d.ellipse([u - r, v - r, u + r, v + r], outline=(255, 0, 0), width=3)
     d.line([u - 18, v, u + 18, v], fill=(255, 0, 0), width=2); d.line([u, v - 18, u, v + 18], fill=(255, 0, 0), width=2)
     d.text((6, 6), 'RED MARK = proposed grasp', fill=(255, 0, 0))
-    prompt = (f'Task instruction (language goal): "{LANG}".\n'
+    prompt = (f'Task instruction (language goal): "{_active_language_goal()}".\n'
               f'The RED circle+cross marks the proposed grasp pixel from a prior look.\n'
               f'Using ONLY the language goal and THIS image (do not rely on memorized brand looks):\n'
               f'{{"marked_object_what": short phrase naming what body the mark sits on,\n'
@@ -478,11 +509,14 @@ YAW0 = yaw_now(); Q0 = Rot.from_quat(obs['robot0_eef_quat'])
 EP = {'closed': False, 'n_same': 0, 'prev': 'none', 'step': 0, 'ever_contact': False, 'n_close': 0, 'released': False,
       'tcp_at_close': None, 'opening_at_close': None, 'uses': {}, 'closes': [], 'hist': [], 'tcp_hist': [],
       'result_hist': [], 'grip_hist': [], 'stage_fail_mark': 0,
+      'last_motion': None, 'motion_before_path': None, 'blocked_motions': {},
+      'motion_help_used': False,
       'approach_changes': 0, 'escapes': 0, 'escape_looks': 0, 'force_next_intent': None,
       'last_result': 'none', 'stall_feedbacks': 0, 'gate_jev_last_dec': None, 'gate_jev_calls': 0,
       'need_reapproach': False, 'reapproach_reason': None, 'reapproach_rev': 0,
       'clear_reapproach_n': 0, 'push_aside_n': 0, 'push_aside_approach_n': 0, 'last_stall_issue': None,
-      'start_plan': None, 'start_plan_rec': None,
+      'start_plan': None, 'start_plan_rec': None, 'task_todo': None, 'todo_calls': 0,
+      'todo_target_id': None, 'todo_review_due': None, 'vision_serial': 0,
       'local_fb_family_hist': [], 'local_deadend_n': 0, 'local_deadend_global_relooks': 0,
       'last_local_deadend_reason': None, 'grasp_secured_once': False, 'in_local_deadend': False,
       'grasp_confirm': False, 'grasp_confirm_detail': None,
@@ -640,10 +674,9 @@ def namespace():
     dxy = PATCH.get('grasp_dxy_objw') or [0.0, 0.0]
     g = PER['grasp'] + np.array([float(dxy[0]) * PER['obj_w'], float(dxy[1]) * PER['obj_w'],
                                  (PATCH['grasp_dz_objh'] + RSHAPE['dz']) * PER['obj_h']])
-    ns = {'tcp': tcp, 'opening': opening(), 'left_contact': l, 'right_contact': r, 'contact': c, 'ever_contact': EP['ever_contact'],
+    ns = {'fine_unit': FS.FINE_UNIT_M, 'tcp': tcp, 'opening': opening(), 'left_contact': l, 'right_contact': r, 'contact': c, 'ever_contact': EP['ever_contact'],
           'closed_cmd': EP['closed'], 'released': EP['released'], 'seen_held': PER['seen_held'],
           'grasp': g, 'objc': PER['objc'], 'place': PER['place'], 'obj_h': PER['obj_h'], 'obj_w': PER['obj_w'], 'clear': PER['clear'], 'open_max': OPEN_MAX,
-          'fine_unit': FS.FINE_UNIT_M,
           'tcp_at_close': EP['tcp_at_close'] if EP['tcp_at_close'] is not None else tcp,
           'opening_at_close': EP['opening_at_close'] if EP['opening_at_close'] is not None else opening(),
           'n_same': EP['n_same'], 'step': EP['step'], 'n_close': EP['n_close'], 'n_relook': P['relook'], 'prev': EP['prev'],
@@ -668,24 +701,241 @@ def facts(ns, preds):
          'times_closed': ns['n_close'], 'released_since_close': ns['released'], 'astra_says_object_held': ns['seen_held'],
          'grasp_point_estimate_m': r3(ns['grasp']), 'object_top_centre_estimate_m': r3(ns['objc']), 'place_point_estimate_m': r3(ns['place']),
          'object_height_estimate_m': round(ns['obj_h'], 3), 'previous_intent': ns['prev'], 'decisions_in_previous_intent': ns['n_same'], 'last_intent_result': ns.get('last_result', 'none')}
-    f.update(preds)
-    f.update(FS.fine_step_fact(FINE_STEPS, EP.get('last_fine_step')))
-    return f
+    f.update(preds); return f
+
+
+def _current_observation():
+    """Capture images and measured proprioception without stepping the simulator."""
+    left, right = contacts()
+    proprio = {
+        'gripper_xyz_m': obs['robot0_eef_pos'].tolist(),
+        'gripper_orientation_xyzw': obs['robot0_eef_quat'].tolist(),
+        'finger_joint_positions_m': obs['robot0_gripper_qpos'].tolist(),
+        'fingers_opening_m': opening(), 'gripper_closed_command': bool(EP['closed']),
+        'left_finger_contact': bool(left), 'right_finger_contact': bool(right),
+    }
+    frames = {'front': obs['agentview_image'][::-1].copy()}
+    if obs.get('robot0_eye_in_hand_image') is not None:
+        frames['wrist'] = obs['robot0_eye_in_hand_image'][::-1].copy()
+    return proprio, frames
+
+
+def _jev_input(*, include_execution_history=False):
+    proprio, frames = _current_observation()
+    state, assets = JO.build_state(LANG, EP['task_todo'], proprio, frames, T[0], DONE[0])
+    state['motion_context'] = _motion_context()
+    if FINE_STEPS:
+        state['motion_context'].update(FS.fine_step_fact(True, EP.get('last_fine_step')))
+    state['startup_obstacle_advice'] = _startup_obstacle_advice()
+    failed_motion = EP.get('last_failed_motion') or EP.get('last_motion', {})
+    failed_image = EP.get('failed_motion_before_path') or EP.get('motion_before_path')
+    if failed_image and failed_motion.get('result') in ('stalled', 'timeout'):
+        import base64, uuid
+        path = failed_image
+        ref = str(uuid.uuid4())
+        with open(path, 'rb') as before_file:
+            encoded = base64.b64encode(before_file.read()).decode()
+        assets[ref] = {'type': 'image', 'format': 'png', 'data_base64': encoded}
+        state['motion_before_image'] = {'asset': ref, 'step': failed_motion['start_step'],
+                                       'note': 'Historical front+wrist image before the failed motion.'}
+    if include_execution_history:
+        state['execution_history'] = JO.execution_history(EP['hist'], EP['result_hist'])
+    # Store the exact observation sent to Jev; no privileged diagnostic fields.
+    EP['vision_serial'] += 1
+    paths = {}
+    for name, pixels in frames.items():
+        path = os.path.join(ep_dir, f'jev_{EP["vision_serial"]}_{name}.png')
+        Image.fromarray(pixels).save(path)
+        paths[name] = path
+    log(t=T[0], jev_observation=True, state=state, frames=paths)
+    return state, assets
+
+
+def _save_task_todo(reason):
+    with open(os.path.join(ep_dir, 'task_todo.json'), 'w') as output:
+        json.dump(EP['task_todo'], output, indent=2)
+    log(t=T[0], task_todo=EP['task_todo'], todo_reason=reason)
+
+
+def _refresh_task_progress(intent=None, result=None):
+    """Main-thread sensor refresh; checkpoints never retarget or call a model."""
+    target_rev = GOAL_TARGET['rev']
+    updated = TODO.refresh_progress(
+        EP['task_todo'], EP['todo_target_id'], T[0],
+        identity_confirmed=goal_id_confirmed(), grasp_ready=_transport_grasp_ready(),
+        gripper_closed=EP['closed'], intent=intent, result=result,
+        waypoints_changed=EP.get('todo_progress_target_rev', target_rev) != target_rev)
+    EP['todo_progress_target_rev'] = target_rev
+    if updated != EP['task_todo']:
+        EP['task_todo'] = updated
+        _save_task_todo('stage_progress')
+
+
+def _retarget_todo():
+    """Invalidate old grasp state; localize and verify the active todo object."""
+    item = TODO.active_item(EP['task_todo'])
+    new_id = item['id'] if item else None
+    if EP.get('todo_target_id') == new_id:
+        return
+    _abandon_async_slow('todo_target_changed')
+    old_id = EP.get('todo_target_id')
+    EP['todo_target_id'] = new_id
+    EP['recovery_history_start'] = len(EP.get('hist', []))
+    EP['last_recovery_preparation'] = None
+    EP['last_failed_motion'] = None
+    EP['failed_motion_before_path'] = None
+    EP['motion_before_path'] = None
+    EP.update(force_next_intent=None, grasp_confirm=False, grasp_secured_once=False,
+              ever_contact=False, place_carry_reached_once=False, place_lower_stall_n=0,
+              place_lift_lower_cycles=0, place_cycle_armed=False, place_force_release=False,
+              place_force_release_reason=None, uses={})
+    _reset_patch('todo_target_changed')
+    RSHAPE.update(tilt=None, tdir=None, yaw=None, dz=0.0)
+    EP.update(tcp_at_close=None, opening_at_close=None, n_same=0,
+              last_stall_issue=None, local_fb_family_hist=[], push_aside_approach_n=0)
+    PER['seen_held'] = False
+    set_goal_id(False, 'todo_target_changed', {'old': old_id, 'new': new_id})
+    GOAL_TARGET['rev'] += 1
+    if item is not None:
+        p, rgb, dep = perceive(phase='todo_target')
+        _commit_keypoints(p, dep, 'todo_target', held_now=False)
+        verification, _ = verify_grasp_identity(p, rgb, phase='todo_target')
+        matched = identity_ok(p) and verification.get('is_language_goal_object') is True
+        set_goal_id(matched, 'todo_target_verified', verification)
+        if not matched:
+            EP['force_next_intent'] = 'relook'
+    log(t=T[0], todo_target_switch=True, old_id=old_id, new_id=new_id)
+
+
+def _review_task_todo(reason):
+    """Only the main thread reviews and commits progress from current frames."""
+    import coding_agent_slow as CAS
+    _abandon_async_slow('todo_review')
+    proprio, frames = _current_observation()
+    paths = []
+    for name, pixels in frames.items():
+        path = os.path.join(ep_dir, f'todo_{EP["todo_calls"]}_{name}.png')
+        Image.fromarray(pixels).save(path)
+        paths.append(path)
+    updated, rec = CAS.call_todo_review(todo=EP['task_todo'], proprioception=proprio,
+                                       image_paths=paths, step=T[0], reason=reason)
+    EP['todo_calls'] += 1
+    P['astra_calls'] += 1
+    P['astra_cost'] += rec['cost_usd']
+    EP['task_todo'] = updated
+    _save_task_todo(reason)
+    _retarget_todo()
+
+def _motion_orientation(shape=None):
+    shape = SHAPE if shape is None else shape
+    def pick(pk, sk, default):
+        return next((v for v in (PATCH.get(pk), RSHAPE.get(sk), shape.get(sk)) if v is not None), default)
+    return [float(pick('yaw_deg', 'yaw', PER['yaw'])),
+            float(pick('tilt_deg', 'tilt', 0)), float(pick('tilt_dir_deg', 'tdir', 0))]
+
+
+def _recovery_context():
+    ns, _ = namespace()
+    start = EP.get('recovery_history_start', 0)
+    progress = MF.recovery_progress(
+        EP.get('hist', [])[start:], EP.get('result_hist', [])[start:],
+        EP.get('tcp_hist', [])[start:], ns['grasp'].tolist(),
+        EP.get('recovery_contact_hist', [])[start:])
+    preparation = EP.get('last_recovery_preparation')
+    if preparation:
+        progress['last_preparation'] = preparation
+        progress['descent_tested_since_preparation'] = EP.get('last_descent_step', -1) >= preparation['step']
+    return progress
+
+
+def _motion_context():
+    ns, _ = namespace()
+    return {'current_robot_contacts': robot_contacts(), 'last_motion': EP.get('last_motion'),
+            'last_failed_motion': EP.get('last_failed_motion'),
+            'recovery_validation': _recovery_context(),
+            'close_position_check': MF.grasp_position(eef().tolist(), ns['grasp'].tolist(), ns['obj_w'], ns['obj_h']),
+            'blocked_intents': list(EP.get('blocked_motions', {})),
+            'slow_help_remaining': max(0, MAX_SLOW - P['slow']),
+            'reserved_motion_diagnosis_remaining': int(FALLBACK and MAX_SLOW > 0 and not EP.get('motion_help_used'))}
+
+
+def _save_approach_overlay(geometry):
+    from PIL import ImageDraw
+    im = Image.fromarray(obs['agentview_image'][::-1].copy())
+    draw = ImageDraw.Draw(im)
+    previous = None
+    for label, key, color in [('TCP', 'tcp_xyz_m', 'cyan'),
+                               ('approach', 'approach_xyz_m', 'yellow'),
+                               ('grasp', 'descent_xyz_m', 'red')]:
+        pixel = MF.project(geometry[key], CP, RM, F, S)
+        if pixel is None: previous = None; continue
+        x, y = pixel
+        if previous is not None: draw.line([previous, (x, y)], fill=color, width=2)
+        draw.ellipse((x-4, y-4, x+4, y+4), outline=color, width=2)
+        draw.text((x+5, y+5), label, fill=color)
+        previous = (x, y)
+    draw.text((5, 5), 'Proposed TCP route only; NOT full hand/arm clearance', fill='yellow')
+    path = os.path.join(ep_dir, 'start_approach_overlay.png')
+    im.save(path)
+    return path
+
+
+def _startup_obstacle_advice():
+    plan = EP.get('start_plan') or {}
+    return {'obstacle_assessment': plan.get('obstacle_assessment'),
+            'suggested_recovery': plan.get('plan', []), 'diagnosis': plan.get('diagnosis'),
+            'note': 'Historical startup prediction, not current collision truth or a forced sequence. '
+                    'Use current motion/contact feedback if the scene has changed.'}
+
+
+def _approach_geometry():
+    ns, _ = namespace()
+    grasp = ns['grasp'].tolist()
+    return {'coordinate_frame': 'world meters; vision-derived estimates, not object ground truth',
+            'tcp_xyz_m': eef().tolist(), 'tcp_orientation_xyzw': obs['robot0_eef_quat'].tolist(),
+            'approach_xyz_m': [grasp[0], grasp[1], grasp[2] + 2 * ns['obj_h']],
+            'descent_xyz_m': grasp, 'place_xyz_m': ns['place'].tolist(),
+            'commanded_yaw_tilt_direction_deg': _motion_orientation(),
+            'maximum_finger_opening_m': OPEN_MAX, 'current_finger_opening_m': opening(),
+            'object_width_estimate_m': ns['obj_w'], 'object_height_estimate_m': ns['obj_h'],
+            'current_robot_contacts': robot_contacts(),
+            'limitations': 'Finger opening is NOT total hand width. Palm/arm swept volume is not '
+                          'collision-checked; occluded clearance must be reported as uncertain.'}
+
 
 def servo(target, grip, gain=1.0, max_steps=60, tol=.006):
     last = eef(); stall = 0
+    start, start_step = last.copy(), T[0]
+    before_contacts = robot_contacts()
+    during = {'environment': set(), 'self': set()}
+    before_image = _combo_rgb()[0].copy()
+    def finish(result):
+        EP['last_motion'] = MF.motion_report(start.tolist(), eef().tolist(), target.tolist(),
+            start_step, T[0], result, before_contacts, during, robot_contacts())
+        EP['motion_before_path'] = None
+        if result in ('stalled', 'timeout'):
+            EP['last_failed_motion'] = EP['last_motion']
+            path = os.path.join(ep_dir, f'motion_before_{start_step}_{T[0]}.png')
+            Image.fromarray(before_image).save(path)
+            EP['motion_before_path'] = path
+            EP['failed_motion_before_path'] = path
+        log(t=T[0], motion_feedback=EP['last_motion'])
+        return result
     pick = lambda pk, sk, d: next((v for v in (PATCH[pk], RSHAPE[sk], SHAPE[sk]) if v is not None), d)
     yw = pick('yaw_deg', 'yaw', PER['yaw']); tl = float(np.clip(pick('tilt_deg', 'tilt', 0), 0, 30)); td = pick('tilt_dir_deg', 'tdir', 0)
     Rt = Rot.from_rotvec(np.deg2rad(tl) * np.array([np.cos(np.deg2rad(td + 90)), np.sin(np.deg2rad(td + 90)), 0])) * Rot.from_euler('z', np.deg2rad(yw)) * Q0
     for _ in range(max_steps):
-        if T[0] >= HORIZON or DONE[0]: return 'horizon_or_done'
+        if T[0] >= HORIZON or DONE[0]: return finish('horizon_or_done')
         d = target - eef(); a = np.zeros(7); a[:3] = np.clip(d / .05 * 1.6, -1, 1) * float(np.clip(gain, .15, 1.0))
         er = (Rt * Rot.from_quat(obs['robot0_eef_quat']).inv()).as_rotvec(); a[3:6] = np.clip(er / .5 * 1.2, -1, 1)
         a[6] = grip; step(a)  # gripper binary open/close (EmbodiedEvo-style)
-        if np.linalg.norm(d) < tol: return 'reached'
+        contact_state = robot_contacts()
+        during['environment'].update(contact_state['environment_contact_parts'])
+        during['self'].update(contact_state['self_contact_parts'])
+        if np.linalg.norm(target - eef()) < tol: return finish('reached')
         mv = np.linalg.norm(eef() - last); last = eef(); stall = stall + 1 if mv < .0005 else 0
-        if stall >= 8: return 'stalled'
-    return 'timeout'
+        if stall >= 8: return finish('stalled')
+    return finish('timeout')
 def grip(g, n):
     for _ in range(n):
         if T[0] >= HORIZON or DONE[0]: break
@@ -743,6 +993,48 @@ LOCAL_LOOP_FAMILY = frozenset({
     'push_aside', 'clear_reapproach', 'raise_redescend', 'lateral_recenter',
 })
 # Same-family local thrash without progress → force retreat + global front relook + sync slow replan.
+
+def _transport_grasp_ready():
+    """Confirmed target grasp with current sensor support, not a historical latch."""
+    if not (EP.get('closed') and EP.get('grasp_confirm') and goal_id_confirmed()):
+        return False
+    left, right = contacts()
+    return bool((left and right) or ((left or right) and opening() >= 0.10 * OPEN_MAX))
+
+
+def _action_block_reason(name, it, ns):
+    held = _transport_grasp_ready()
+    if name == 'close_gripper' and not EP['closed']:
+        if not goal_id_confirmed(): return 'close_refused_identity'
+        if not MF.grasp_position(eef().tolist(), ns['grasp'].tolist(), ns['obj_w'], ns['obj_h'])['ready']:
+            return CLOSE_NOT_READY
+    if held and (it.get('fingers') == 'open' or name in ('clear_reapproach', 'change_approach_yaw')):
+        if name != 'open_gripper': return 'motion_not_executed:preserve_confirmed_grasp'
+        if not MF.release_position(eef().tolist(), ns['place'].tolist(), ns['clear']):
+            return 'release_not_executed:not_at_destination'
+    if name in EP.get('blocked_motions', {}):
+        if name == 'back_off':
+            target = (eef() + [0, 0, max(.04, float(PER['obj_h']))]).tolist()
+        else:
+            target = np.asarray(dsl.evaluate(it['refpoint'], ns), float).tolist()
+        shape = {key: float(dsl.evaluate(str(it[field]), ns)) if field in it else None
+                 for key, field in [('yaw', 'yaw_deg'), ('tilt', 'tilt_deg'), ('tdir', 'tilt_dir_deg')]}
+        orientation = _motion_orientation() if name == 'back_off' else _motion_orientation(shape)
+        if MF.same_motion(EP['blocked_motions'][name], target, orientation):
+            return 'motion_not_executed:unchanged_failed_waypoint'
+    return None
+
+
+def _acting_menu(intents, ns=None):
+    ns = ns if ns is not None else namespace()[0]
+    ready = _transport_grasp_ready()
+    return {name: intent for name, intent in intents.items()
+            if (name != 'close_gripper' or goal_id_confirmed())
+            and (name not in TRANSPORT_INTENTS or ready)
+            and not _action_block_reason(name, intent, ns)
+            and (name not in ASK_ASTRA_NAMES or (FALLBACK and P['slow'] < MAX_SLOW))
+            and (name != 'relook' or P['relook'] < MAX_RELOOK)}
+
 
 def _grasp_secured_now(ns=None):
     """Policy-visible: confirmed grasp, or bilateral contact + closed (+ optional seen_held)."""
@@ -1405,6 +1697,7 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
                 },
             }
     EP['stall_feedbacks'] = int(EP.get('stall_feedbacks', 0)) + 1
+    before_recovery = {'tcp_xyz_m': eef().tolist(), 'commanded_orientation_deg': _motion_orientation()}
     detail = {'action': action, 'reason': reason, 'stall_feedback_n': EP['stall_feedbacks']}
     l = bool(ns.get('left_contact')); r = bool(ns.get('right_contact')); both = bool(ns.get('contact'))
     grip = -1.0 if not EP['closed'] else 1.0
@@ -1497,6 +1790,12 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
 
     CUR.update(fb=f"STALLFB:{action}", fb_t=T[0])
     _note_patch_mutation(f'stall_feedback:{action}', detail)
+    if action in ('clear_reapproach', 'change_approach_yaw', 'raise_redescend', 'lateral_recenter'):
+        EP['last_recovery_preparation'] = {
+            'step': T[0], 'action': action, 'before': before_recovery,
+            'after': {'tcp_xyz_m': eef().tolist(), 'commanded_orientation_deg': _motion_orientation()},
+            'status': 'preparation_attempted_descent_unverified',
+        }
     try:
         _record_local_stall_family(action)
     except Exception:
@@ -1663,7 +1962,6 @@ def _execute_fine_step(it, ns):
         r = 'at_target'
     else:
         # Keep the current approach yaw/tilt (PATCH / RSHAPE / perception). Do not invent a new orientation.
-        SHAPE.update(tilt=0.0, tdir=0.0, yaw=None)
         try:
             gain = float(dsl.evaluate(str(it.get('gain', '1')), ns))
         except Exception:
@@ -1682,8 +1980,45 @@ def execute(name, ns):
     if act in ASK_ASTRA_NAMES or name in ASK_ASTRA_NAMES:
         return do_ask_astra(f'jev_intent:{name}')
     if act == 'relook': return do_relook('library rule chose relook')
-    if act == 'finish': return 'finish'
+    if act == 'finish':
+        EP['todo_review_due'] = 'finish_requested'
+        return 'finish' if DONE[0] else 'skip_finish'
+    if name in TRANSPORT_INTENTS and not _transport_grasp_ready():
+        EP['grasp_confirm'] = False
+        EP['grasp_secured_once'] = False
+        PER['seen_held'] = False
+        return f'{name}_not_executed:grasp_unconfirmed'
+    blocked = _action_block_reason(name, it, ns)
+    if blocked and blocked != 'close_refused_identity':
+        log(t=T[0], action_not_executed=name, reason=blocked)
+        return blocked
     if act == 'fine_step': return _execute_fine_step(it, ns)
+    if name in MOTION_RECOVERIES:
+        if name == 'back_off':
+            target = eef().copy(); target[2] += max(.04, float(PER['obj_h']))
+            r = servo(target, 1 if EP['closed'] else -1, .5, max_steps=40)
+            if r == 'reached': EP['blocked_motions'] = {}
+            elif r in ('stalled', 'timeout'):
+                EP.setdefault('blocked_motions', {})[name] = {
+                    'target_xyz_m': target.tolist(), 'orientation_deg': _motion_orientation()}
+            return r
+        # Expired hold latches must not suppress recovery after actual contact/identity loss.
+        EP['grasp_confirm'] = False
+        EP['grasp_secured_once'] = False
+        PER['seen_held'] = False
+        before_step = T[0]
+        detail = _apply_stall_feedback(ns, 'acting_motion_recovery', action=name)
+        motion = EP.get('last_motion') or {}
+        if motion.get('start_step', -1) >= before_step and motion.get('result') in ('stalled', 'timeout'):
+            return motion['result']
+        return 'recovery_prepared:' + str(detail.get('action')) + ':descent_unverified'
+    if name == 'close_gripper' and EP['closed']:
+        if _transport_grasp_ready():
+            return 'already_closed'
+        EP['grasp_confirm'] = False
+        EP['grasp_secured_once'] = False
+        PER['seen_held'] = False
+        return GRASP_FAILED
     if fing == 'close' and not EP['closed']:
         # HARD GATE: null/false/unsure goal identity ⇒ force relook, refuse close until matched. Uncertain ≠ proceed.
         # When relook budget is exhausted, DO NOT freeze: raise + relative approach change + escape look.
@@ -1720,19 +2055,35 @@ def execute(name, ns):
             ID_EVENTS.append({'where': 'close_blocked_reapproach', 'reason': EP.get('reapproach_reason'),
                               'rev': EP.get('reapproach_rev'), 'goal_id': dict(GOAL_ID)})
             return 'close_blocked_need_reapproach'
+        # Identity/relook may have moved the grasp estimate since the menu was built.
+        current_ns, _ = namespace()
+        if not MF.grasp_position(eef().tolist(), current_ns['grasp'].tolist(),
+                                 current_ns['obj_w'], current_ns['obj_h'])['ready']:
+            return CLOSE_NOT_READY
         _clear_reapproach_if_aligned('pre_close')
         EP['closed'] = True; grip(1, 20); EP['n_close'] += 1; EP['released'] = False
         EP['tcp_at_close'] = eef(); EP['opening_at_close'] = opening()
         EP['closes'].append({'xyz': [round(float(x), 3) for x in eef()], 'opening_after_close': round(opening(), 4),
                              'both_contact': all(contacts()), 'goal_id_confirmed': True})
         try:
-            _confirm_grasp_after_close()
-        except Exception:
-            pass
+            secured, detail = _confirm_grasp_after_close()
+        except Exception as exc:
+            secured = False
+            log(t=T[0], grasp_confirmation_error=True, error_type=type(exc).__name__)
+        if not secured:
+            EP['grasp_confirm'] = False
+            EP['grasp_secured_once'] = False
+            PER['seen_held'] = False
+            return GRASP_FAILED
         return 'closed'
     if fing == 'open' and EP['closed']:
         EP['closed'] = False; grip(-1, 15); EP['released'] = True; EP['just_released'] = True
         EP['grasp_confirm'] = False
+        EP['grasp_secured_once'] = False
+        PER['seen_held'] = False
+        EP['todo_review_due'] = 'gripper_released'
+    if name == 'reopen_and_retry':
+        return 'reopened'  # Opening is separate from approaching a potentially stale point.
     try: tgt = np.asarray(dsl.evaluate(it['refpoint'], ns), float).reshape(3)
     except Exception as e: return 'refpoint_error'
     def ev(k):
@@ -1745,7 +2096,11 @@ def execute(name, ns):
         _clear_reapproach_if_aligned('at_target')
         return 'at_target'
     r = servo(tgt, 1 if EP['closed'] else -1, gain)
-    if r == 'reached':
+    if r in ('stalled', 'timeout'):
+        EP.setdefault('blocked_motions', {})[name] = {
+            'target_xyz_m': tgt.tolist(), 'orientation_deg': _motion_orientation()}
+    elif r == 'reached':
+        EP.get('blocked_motions', {}).pop(name, None)
         _clear_reapproach_if_aligned('reached')
     return r
 
@@ -1899,8 +2254,8 @@ def _apply_episode_plan(p, dep, source='slow'):
 
 def _run_episode_start_plan():
     """Great Wall: predictive global plan after start identity, before first approach.
-    Uses Codex; applies via `_apply_episode_plan`; persists start_plan.json.
-    Mid-episode slow-think must only fine-tune this prior, not replan from zero."""
+    Astra via Codex writes the todo and start_plan.json before target localization.
+    The todo owns task progress; phase_order remains historical planner advice."""
     import coding_agent_slow as CAS
     mode = 'codex'
     out = {'mode': mode, 'applied': False, 'plan_done': [], 'error': None}
@@ -1961,14 +2316,15 @@ def _run_episode_start_plan():
             'place': (per0 or {}).get('place_region_named'),
             'place_where': (per0 or {}).get('place_region_where'),
         },
+        'approach_geometry': _approach_geometry(),
         'neighbour_prior': (
             'If another object sits close to the grasp target so the open gripper may collide '
-            'before a bilateral close, plan push_aside or clear_reapproach BEFORE the first approach. '
+            'before a bilateral close, prefer clear_reapproach or change_approach_yaw before approach. '
             'Clearance requires confirmed identity; if identity is unsure, relook first.'
         ),
     }
-    # Heuristic geometry hint (no object names): if grasp and a nearby body-sized offset — left to planner images.
-    images = []
+    # Annotate the proposed route so geometry can be related to the same front view.
+    images = [_save_approach_overlay(start_hints['approach_geometry'])]
     for name in ('start.jpg', 'start_wrist.jpg', 'start_id_verify.jpg', 'start_id_relook.jpg'):
         fp = os.path.join(ep_dir, name)
         if os.path.isfile(fp):
@@ -1987,6 +2343,9 @@ def _run_episode_start_plan():
         art = {'plan': parsed, 'proposed_plan': proposed_plan, 'rec': rec, 'start_hints': start_hints, 'mode': mode, 'experience_brief': brief}
         with open(os.path.join(ep_dir, 'start_plan.json'), 'w') as plan_file:
             json.dump(art, plan_file, indent=1, default=str)
+        EP['task_todo'] = TODO.initialize(parsed.get('task_todo'), LANG, T[0])
+        _save_task_todo('start_plan')
+        _retarget_todo()
         EP['start_plan'] = parsed
         EP['start_plan_rec'] = {k: rec.get(k) for k in ('backend', 'wall_s', 'cost_usd', 'model', 'effort', 'validate_ok', 'validate_errs') if k in (rec or {})}
         out['plan'] = parsed
@@ -1997,23 +2356,10 @@ def _run_episode_start_plan():
             predicted_risks=(parsed or {}).get('predicted_risks'),
             phase_order=(parsed or {}).get('phase_order'),
             plan=(parsed or {}).get('plan'))
-        if parsed and parsed.get('intervene') and (parsed.get('plan') or []):
-            if str(parsed.get('issue') or '') == 'blocked_by_neighbour':
-                EP['last_stall_issue'] = 'blocked_by_neighbour'
-            if not goal_id_confirmed():
-                # A planning assertion is not a keypoint/identity verification.
-                # Queue a real perception intent before starting task motion.
-                EP['force_next_intent'] = 'relook'
-                out['plan_done'] = ['relook_queued_identity_unconfirmed']
-                log(t=T[0], episode_start_plan_deferred=True, reason='identity_unconfirmed')
-                return out
-            done = _apply_episode_plan(parsed, DEP0, source='episode_start')
-            out['plan_done'] = done
-            out['applied'] = True
-            log(t=T[0], episode_start_plan_applied=True, plan_done=done, patch=dict(PATCH))
-            # After clearance, force re-approach above object (push_aside also sets this).
-            if EP.get('force_next_intent') is None:
-                EP['force_next_intent'] = 'move_above_object'
+        # Keep start recovery advice as a recorded proposal. The first acting
+        # decision uses the newly localized todo target and current images.
+        if not goal_id_confirmed():
+            EP['force_next_intent'] = 'relook'
         return out
     except Exception as ex:
         out['error'] = str(ex)[:400]
@@ -2062,6 +2408,7 @@ def _slow_critical(intent, result):
 def _slow_ctx(intent, result):
     ns, preds = namespace()
     return json.dumps({'just_finished_intent': intent, 'intent_result': result, 'language_goal': LANG,
+                       'motion_context': _motion_context(),
                        'recent_intents': EP['hist'][-6:], 'recent_intent_results': EP.get('result_hist', [])[-6:],
                        'recent_gripper_closed': EP.get('grip_hist', [])[-6:],
                        'times_closed': EP['n_close'], 'close_attempts': EP['closes'][-3:],
@@ -2140,11 +2487,12 @@ def _finish_slow(parsed, rec, dep, both, intent, result, mode, crit, snap_dec):
         ID_EVENTS.append({'where': 'slow_think', 'intent': intent, 'result': result, **{k: out[k] for k in
             ('issue', 'intervene', 'is_goal_object', 'goal_object_where', 'held_or_between_fingers', 'diagnosis', 'mode', 'crit')}})
         return 'ok', out
-    if P['slow'] >= MAX_SLOW:
+    if P['slow'] >= MAX_SLOW and crit != 'reserved_motion_obstruction':
         out['intervene'] = False; return 'slow_cap_drop', out
-    P['slow'] += 1
+    if crit != 'reserved_motion_obstruction': P['slow'] += 1
     done_steps = _apply_episode_plan(parsed, dep, source='slow')
-    Image.fromarray(both).save(os.path.join(ep_dir, f'slow{P["slow"]}.jpg'))
+    image_name = f'slow_motion_reserved_{T[0]}.jpg' if crit == 'reserved_motion_obstruction' else f'slow{P["slow"]}.jpg'
+    Image.fromarray(both).save(os.path.join(ep_dir, image_name))
     CUR.update(slow=f"{mode}/{crit or '-'}:{issue}->{done_steps}"[:160], slow_t=T[0])
     out.update(plan_done=done_steps, patch=dict(PATCH))
     ID_EVENTS.append({'where': 'slow_think', 'intent': intent, 'result': result, **{k: out.get(k) for k in
@@ -2165,7 +2513,10 @@ def _prepare_slow_snapshot(ctx, crit, phase, both, image_tag):
         lang=LANG, trigger=str(crit or phase), slow_ctx_json=ctx,
         experience_brief=brief, patch=PATCH,
         goal_id={'confirmed': goal_id_confirmed(), 'target': GOAL_TARGET},
-        ep_dir=ep_dir, keyframe_paths=[frame])
+        ep_dir=ep_dir, keyframe_paths=[p for p in (EP.get('failed_motion_before_path') or EP.get('motion_before_path'), frame) if p])
+    context['motion_images_note'] = 'First image, when two supplied, is before last failed motion; last image is current.'
+    context['task_todo'] = json.loads(json.dumps(EP.get('task_todo')))
+    context['active_goal'] = TODO.active_item(context['task_todo']) if context['task_todo'] else None
     return {'t': T[0], 'coding_context': context}
 
 
@@ -2353,7 +2704,12 @@ def _sync_slow(intent, result, crit):
         else:
             _abandon_async_slow(reason=f'sync:{crit}')
     _drain_orphan_slow_costs()
-    if P['slow'] >= MAX_SLOW: return 'slow_cap', None
+    reserved = (crit in ('motion_obstruction', 'recovery_no_progress') and MAX_SLOW > 0 and
+                P['slow'] >= MAX_SLOW and not EP.get('motion_help_used'))
+    if P['slow'] >= MAX_SLOW and not reserved: return 'slow_cap', None
+    if reserved:
+        EP['motion_help_used'] = True  # spend once even when the request fails
+        crit = 'reserved_motion_obstruction'
     both, rgb, dep = _combo_rgb()
     ctx = _slow_ctx(intent, result)
     try:
@@ -2407,8 +2763,16 @@ def do_ask_astra(reason):
     return f'ask_astra:{sr}'
 
 def _hard_astra_trigger(intent, result):
-    """Hard rules: stall/timeout or identity-unstable → force sync Codex (shares MAX_SLOW)."""
-    if not FALLBACK or P['slow'] >= MAX_SLOW:
+    """Critical physical stalls retain one bounded diagnosis after general help is exhausted."""
+    if not FALLBACK:
+        return None
+    if _recovery_context()['no_progress'] and MAX_SLOW > 0:
+        if P['slow'] < MAX_SLOW or not EP.get('motion_help_used'):
+            return 'recovery_no_progress'
+    if result in ('stalled', 'timeout') and MAX_SLOW > 0:
+        if P['slow'] < MAX_SLOW or not EP.get('motion_help_used'):
+            return 'motion_obstruction'
+    if P['slow'] >= MAX_SLOW:
         return None
     if intent in ASK_ASTRA_NAMES:
         return None  # already consulted via execute
@@ -2473,46 +2837,22 @@ def _spectator_gate_eligible(intent, dec):
     return True
 
 def _spectator_jev_state(intent, result, signals, ns, facts):
-    """Compact spectator context — trajectory + brief, not video."""
-    brief = JX.build_jev_experience_brief(
-        LIB, facts=facts, ns=ns, uses=EP.get('uses'), episode_lessons=FB_LESSONS, dsl=dsl,
-        max_recoveries=4, max_lessons=3, max_active=2,
-    )
-    return {
-        'role': 'spectator_gate',
-        'note': (
-            'You are a separate spectator (旁观者清), NOT the acting policy. '
-            'Acting Jev can be 当局者迷 — stuck repeating a bad plan. '
-            'Decide whether to hand control to Codex slow-think using the current visual evidence.'
-        ),
-        'language_goal': LANG,
-        'just_finished_intent': intent,
-        'intent_result': result,
-        'distress_signals': signals,
+    """Current image/todo/proprioception plus actual execution events."""
+    state, assets = _jev_input()
+    state['role'] = 'spectator_gate'
+    state['execution_events'] = {
+        'just_finished_intent': intent, 'intent_result': result,
         'recent_intents': (EP.get('hist') or [])[-8:],
         'recent_intent_results': (EP.get('result_hist') or [])[-8:],
-        'goal_id_confirmed': goal_id_confirmed(),
-        'close_refusals': GOAL_ID.get('close_refusals', 0),
-        'stall_feedback_count': EP.get('stall_feedbacks', 0),
-        'n_same': EP.get('n_same', 0),
-        'slow_used': P['slow'],
-        'max_slow': MAX_SLOW,
-        'key_facts': {
-            'both_fingers_contact': facts.get('both_fingers_contact'),
-            'times_closed': facts.get('times_closed'),
-            'last_intent_result': facts.get('last_intent_result'),
-            'previous_intent': facts.get('previous_intent'),
-            'descent_stalled': facts.get('descent_stalled'),
-            'descent_servo_stalled': facts.get('descent_servo_stalled'),
-            'empty_close': facts.get('empty_close'),
-        },
-        'experience_brief': brief,
+        'slow_used': P['slow'], 'max_slow': MAX_SLOW,
     }
+    return state, assets
+
 
 _SPECTATOR_CRITERIA = {
     'defer_to_astra': (
         'Yes — request Codex planning: acting looks stuck, identity doubtful, oscillating, '
-        'or experience_brief suggests a vision consult would help. Shares slow-think budget.'
+        'or current images contradict task_todo progress. Shares slow-think budget.'
     ),
     'continue_acting': (
         'No — let acting Jev keep going; progress looks plausible or distress is mild / already handled.'
@@ -2523,16 +2863,16 @@ def _spectator_jev_should_ask_astra(intent, result, signals, ns, facts, dec):
     """Light spectator Jev call → (defer: bool, detail dict). Updates cooldown on every call."""
     EP['gate_jev_last_dec'] = dec
     EP['gate_jev_calls'] = int(EP.get('gate_jev_calls') or 0) + 1
-    state = _spectator_jev_state(intent, result, signals, ns, facts)
+    state, assets = _spectator_jev_state(intent, result, signals, ns, facts)
     instr = (
         'Spectator gate only: choose defer_to_astra OR continue_acting. '
-        'Prefer defer_to_astra when distress_signals show stall/identity/oscillation/repeat without clear recovery, '
-        'or when active_recoveries/lessons imply a vision check. Prefer continue_acting when the last result '
+        'Prefer defer_to_astra when execution_events and current images show failure/repetition without recovery, '
+        'or current images contradict task_todo progress. Prefer continue_acting when the last result '
         'shows progress, relook just matched, or budget is nearly spent. One short decisive choice.'
     )
     meta = {**META, 'phase': 'spectator_jev_gate', 'signals': list(signals)}
     try:
-        choice, probs, lat = JC.choose(state, instr, _SPECTATOR_CRITERIA, meta=meta)
+        choice, probs, lat = JC.choose(state, instr, _SPECTATOR_CRITERIA, assets=assets, meta=meta)
         defer = choice == 'defer_to_astra'
         detail = {'choice': choice, 'probabilities': probs, 'latency_s': lat, 'signals': list(signals)}
         log(dec=dec, t=T[0], spectator_jev=True, defer=defer, **{k: detail[k] for k in ('choice', 'signals', 'latency_s')})
@@ -2666,6 +3006,13 @@ try:
         raise RuntimeError(f"episode_start_plan_failed:{START_PLAN_OUT['error']}")
     intents = {i['name']: i for i in LIB['intents']}
     while T[0] < HORIZON and not DONE[0] and dec < MAX_DEC:
+        _refresh_task_progress()
+        if EP.get('todo_review_due'):
+            _review_task_todo(EP.pop('todo_review_due'))
+        if EP['closed'] and not any(contacts()):
+            EP['grasp_confirm'] = False
+            EP['grasp_secured_once'] = False
+            PER['seen_held'] = False
         trig = fb_trigger()
         if trig:  # early perception-and-Codex recovery: episode-only re-perception (never edits the library)
             P['fb'] += 1; r, pt = do_fallback(trig); fb_events.append({'dec': dec, 'trigger': trig, 'result': r, 'patch': pt})
@@ -2735,23 +3082,28 @@ try:
                     tcp=list(np.asarray(ns['tcp'], float).round(4)))
             except Exception:
                 pass
-        # Deadlock guard: if identity unconfirmed and relook budget gone, never ask Jev for close_gripper.
-        if forced is None and (not goal_id_confirmed()) and P['relook'] >= MAX_RELOOK:
-            menu = {k: v for k, v in intents.items() if k != 'close_gripper'}
-            if not menu: menu = intents
-            it, probs, _ = JC.choose(JX.jev_choose_state(LANG, f, LIB, ns=ns, uses=EP.get('uses'), episode_lessons=FB_LESSONS, episode_start_plan=EP.get('start_plan'), dsl=dsl),
-                                     JX.jev_choose_instructions(LIB, extra='Do NOT select close_gripper until goal identity is confirmed; prefer ask_astra, relook, move_above_object, or reopen_and_retry.'),
-                                     {k: v['definition'] for k, v in menu.items()}, meta=META); jev_calls += 1
-        elif forced: it, probs = forced, None
+        _refresh_task_progress()
+        if forced:
+            it, probs = forced, None
         else:
-            it, probs, _ = JC.choose(JX.jev_choose_state(LANG, f, LIB, ns=ns, uses=EP.get('uses'), episode_lessons=FB_LESSONS, episode_start_plan=EP.get('start_plan'), dsl=dsl),
-                                     JX.jev_choose_instructions(LIB),
-                                     {k: v['definition'] for k, v in intents.items()}, meta=META); jev_calls += 1
+            state, assets = _jev_input(include_execution_history=True)
+            menu = _acting_menu(intents, ns)
+            it, probs, _ = JC.choose(state, JO.INSTRUCTIONS,
+                                     JO.candidate_definitions(menu), assets=assets, meta=META)
+            jev_calls += 1
         CUR['intent'] = it; r = execute(it, ns); dec += 1
+        _refresh_task_progress(it, r)
         EP['last_result'] = r
+        if it in ASK_ASTRA_NAMES or it in ('relook', 'retreat') or r in FAIL_RESULTS or 'empty' in str(r):
+            EP['todo_review_due'] = f'{it}:{r}'
         EP['n_same'] = EP['n_same'] + 1 if it == EP['prev'] else 1; EP['prev'] = it; EP['step'] += 1
         EP['hist'].append(it); EP['tcp_hist'].append(eef())
         EP['result_hist'].append(r); EP['grip_hist'].append(bool(EP['closed']))
+        contact_state = robot_contacts()
+        EP.setdefault('recovery_contact_hist', []).append(
+            contact_state['environment_contact_parts'] + contact_state['self_contact_parts'])
+        if it == 'descend_to_grasp' and r in ('reached', 'at_target', 'stalled', 'timeout'):
+            EP['last_descent_step'] = T[0]
         # Place-phase thrash tracking → maybe queue force open_gripper for next decision
         try:
             _note_place_phase(it, r)
@@ -2761,13 +3113,7 @@ try:
         # grip change clears stage-fail streak debounce so a later stuck phase can fire again
         if len(EP['grip_hist']) >= 2 and EP['grip_hist'][-1] != EP['grip_hist'][-2]:
             EP['stage_fail_mark'] = 0
-        _fs = EP.get('last_fine_step')
-        if isinstance(_fs, dict) and _fs.get('intent') == it:
-            f = dict(f)
-            f.update(FS.fine_step_fact(True, _fs))
-            log(dec=dec, t=T[0], intent=it, forced=forced, result=r, facts=f, fine_step=_fs)
-        else:
-            log(dec=dec, t=T[0], intent=it, forced=forced, result=r, facts=f)
+        log(dec=dec, t=T[0], intent=it, forced=forced, result=r, facts=f, probabilities=probs)
         # Codex planning help: ask_astra already ran sync in execute; else hard-force; else spectator gate; else normal slow-think
         if r != 'finish' and not DONE[0] and T[0] < HORIZON:
             skip = {'rate_limited', 'skip_at_target', 'skip_finish', 'disabled', 'done', 'slow_cap', 'async_busy',
@@ -2808,6 +3154,7 @@ try:
                         if so is not None or sr not in skip:
                             slow_events.append({'dec': dec, 'intent': it, 'intent_result': r, 'result': sr, 'detail': so})
                             log(dec=dec, t=T[0], slow_think=sr, intent=it, intent_result=r, detail=so)
+        _refresh_task_progress()
         if r == 'finish': break
     # LIBERO official eval does not stop on a policy 'finish': keep no-op stepping (gripper holds last command) until done or HORIZON
     stop = 'finish' if EP['prev'] == 'finish' else ('decision_cap' if dec >= MAX_DEC else None); t_stop = T[0]
@@ -2815,10 +3162,14 @@ try:
         step([0, 0, 0, 0, 0, 0, 1 if EP['closed'] else -1])
     if DONE[0]: end = 'success' if stop is None else f'{stop}_then_success'
     else: end = f'{stop}_not_success' if stop else 'horizon'
+    _refresh_task_progress()
     res['stopped_at_step'] = t_stop if stop else None
 except Exception:
     import traceback; end = 'harness_error'; res['error'] = traceback.format_exc()[-1200:]
 _finalize_slow_jobs()
+if DONE[0] and EP.get('task_todo'):
+    EP['task_todo'] = TODO.official_completion(EP['task_todo'], T[0])
+    _save_task_todo('official_success')
 # diagnostic: which sim body moved most (never shown to policy)
 moved_most = None
 try:
@@ -2835,18 +3186,27 @@ res.update(success=bool(DONE[0]), end_reason=end, env_steps=T[0], decisions=dec,
            astra_cost_usd=round(P['astra_cost'], 4), planning_calls=P['planning_calls'],
            planning_cost_usd=round(P['planning_cost'], 4), relooks=P['relook'], fallback_events=fb_events, slow_think_events=slow_events,
            slow_interventions=P['slow'], gate_jev_calls=EP.get('gate_jev_calls', 0), final_patch=PATCH, fallback_lessons=FB_LESSONS, learned_shape=RSHAPE,
+           task_todo=EP.get('task_todo'), todo_review_calls=EP.get('todo_calls', 0),
            start_identity=START_ID, identity_events=ID_EVENTS, goal_id=GOAL_ID, goal_target=GOAL_TARGET,
            close_refusals=GOAL_ID.get('close_refusals', 0), moved_most=moved_most, wall_s=round(time.time() - t0, 1),
+           motion_diagnosis_used=bool(EP.get('motion_help_used')),
            place_force_release=bool(EP.get('place_force_release')),
            place_force_release_reason=EP.get('place_force_release_reason'),
            place_lower_stall_n=int(EP.get('place_lower_stall_n', 0)),
            place_lift_lower_cycles=int(EP.get('place_lift_lower_cycles', 0)))
+if VID:
+    try:
+        VID.stdin.close()
+    except BrokenPipeError:
+        pass
+    video_rc = VID.wait()
+    res['video_path'] = VIDP
+    res['video_exit_code'] = video_rc
 if FINE_STEPS or EP.get('fine_step_events'):
     res['fine_steps_enabled'] = bool(FINE_STEPS)
     res['fine_step_events'] = list(EP.get('fine_step_events') or [])
 json.dump(res, open(os.path.join(ep_dir, 'result.json'), 'w'), indent=1, default=lambda o: np.asarray(o).tolist())
 print(json.dumps({k: res[k] for k in ('suite', 'task_id', 'init', 'success', 'end_reason', 'env_steps', 'decisions', 'astra_cost_usd', 'slow_interventions', 'close_refusals', 'wall_s') if k in res}))
-if VID: VID.stdin.close(); VID.wait()
 try: env.close()  # explicit EGL teardown (avoid __del__ EGLError at interpreter exit)
 except Exception: pass
 sys.stdout.flush(); logf.close(); os._exit(1 if end == 'harness_error' else 0)

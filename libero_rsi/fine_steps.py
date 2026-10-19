@@ -24,7 +24,7 @@ MERGE_TIP = (
     'Fine-step menu: intents named fine_* keep the current gripper state and servo '
     'along one world axis by five millimetres, one centimetre, or three centimetres. '
     'Use one when the grasp or place estimate is only slightly off. '
-    'After it runs, read observed_facts.last_fine_step for the servo result and the new end-effector position.'
+    'After it runs, read motion_context.last_fine_step for the servo result and the new end-effector position.'
 )
 _AXES = (
     ('x', 0, 'positive world x', 'negative world x'),
