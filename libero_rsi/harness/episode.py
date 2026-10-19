@@ -22,8 +22,8 @@ from validate import validate
 from . import assist, executor, grasping, observation, planning, pose, progress, recovery, robot, state, vision
 from .config import (ASK_ASTRA_NAMES, FINE_STEPS, HORIZON, MAX_DEC, MOTION_RECOVERIES, RECOVERY_MODE,
                      STALL_FB_ACTIONS)
-from .state import (CUR, DONE, EP, FB_LESSONS, GOAL_ID, GOAL_TARGET, ID_EVENTS, P, PATCH, PER, RSHAPE, START_ID, T,
-                    log, new_episode_state, rt)
+from .state import (CUR, DONE, EP, FB_LESSONS, GOAL_ID, GOAL_TARGET, ID_EVENTS, NONFATAL, P, PATCH, PER, RSHAPE,
+                    START_ID, T, log, new_episode_state, nonfatal, rt)
 
 QUIET_SLOW_RESULTS = frozenset({'rate_limited', 'skip_at_target', 'skip_finish', 'disabled', 'done', 'slow_cap',
                                 'async_busy', 'ask_astra_disabled', 'ask_astra_cap', 'spectator_disabled',
@@ -220,12 +220,10 @@ def run_decision_loop(run):
         # B05: recovery mutates pose/PATCH — recompute ns/facts before selection and execute.
         if recovery_mutated:
             ns, preds = observation.namespace(); f = observation.facts(ns, preds)
-            try:
+            with nonfatal('post_recovery_log', dec=rt.dec):
                 log(dec=rt.dec, t=T[0], post_recovery_ns_refresh=True, forced=forced,
                     grasp=list(np.asarray(ns['grasp'], float).round(4)),
                     tcp=list(np.asarray(ns['tcp'], float).round(4)))
-            except Exception:
-                pass
         progress._refresh_task_progress()
         if forced:
             it, probs = forced, None
@@ -251,11 +249,8 @@ def run_decision_loop(run):
         if it == 'descend_to_grasp' and r in ('reached', 'at_target', 'stalled', 'timeout'):
             EP['last_descent_step'] = T[0]
         # Place-phase thrash tracking → maybe queue force open_gripper for next decision
-        try:
-            grasping._note_place_phase(it, r)
-            grasping._maybe_queue_place_force_release()
-        except Exception:
-            pass
+        grasping._note_place_phase(it, r)
+        grasping._maybe_queue_place_force_release()
         # grip change clears stage-fail streak debounce so a later stuck phase can fire again
         if len(EP['grip_hist']) >= 2 and EP['grip_hist'][-1] != EP['grip_hist'][-2]:
             EP['stage_fail_mark'] = 0
@@ -309,7 +304,8 @@ def finish_episode(run, end):
                place_force_release=bool(EP.get('place_force_release')),
                place_force_release_reason=EP.get('place_force_release_reason'),
                place_lower_stall_n=int(EP.get('place_lower_stall_n', 0)),
-               place_lift_lower_cycles=int(EP.get('place_lift_lower_cycles', 0)))
+               place_lift_lower_cycles=int(EP.get('place_lift_lower_cycles', 0)),
+               nonfatal_errors=list(NONFATAL))
     if rt.VID:
         try:
             rt.VID.stdin.close()
@@ -327,8 +323,8 @@ def finish_episode(run, end):
     with open(os.path.join(rt.ep_dir, 'result.json'), 'w') as f:
         json.dump(res, f, indent=1, default=lambda o: np.asarray(o).tolist())
     print(json.dumps({k: res[k] for k in ('suite', 'task_id', 'init', 'success', 'end_reason', 'env_steps', 'decisions', 'astra_cost_usd', 'slow_interventions', 'close_refusals', 'wall_s') if k in res}))
-    try: rt.env.close()  # explicit EGL teardown (avoid __del__ EGLError at interpreter exit)
-    except Exception: pass
+    with nonfatal('env_close'):
+        rt.env.close()  # explicit EGL teardown (avoid __del__ EGLError at interpreter exit)
     sys.stdout.flush(); rt.logf.close()
     return res
 
@@ -342,10 +338,7 @@ def main(argv):
         start_plan = planning._run_episode_start_plan()
     except Exception as _sp_ex:
         start_plan = {'mode': 'error', 'error': str(_sp_ex)[:300]}
-        try:
-            log(t=T[0], episode_start_plan_error=True, err=start_plan['error'])
-        except Exception:
-            pass
+        log(t=T[0], episode_start_plan_error=True, err=start_plan['error'])
     run = {'t0': time.time(), 'jev_calls': 0, 'fb_events': [], 'slow_events': [],
            'res': {'suite': rt.suite, 'task_id': rt.tid, 'init': rt.init_i, 'language': rt.LANG, 'library': rt.LIBP,
                    'library_version': rt.LIB.get('version'), 'fallback': rt.FALLBACK, 'perception0': rt.per0,

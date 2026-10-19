@@ -18,8 +18,10 @@ import jev_experience as JX
 import task_todo as TODO
 
 from . import observation, progress, recovery, robot, vision
-from .config import AUTO_RECOVERY_RULES, FAIL_RESULTS, HORIZON, MAX_PUSH_ASIDE, MAX_SLOW, NEIGHBOUR_STALL_ISSUES, SLOW_MIN_GAP_S, SLOW_STALE_INTENTS, STAGE_FAIL_N
-from .state import CUR, DONE, EP, FB_LESSONS, GOAL_TARGET, ID_EVENTS, P, PATCH, PER, SLOW_JOB, SLOW_JOB_SEQ, SLOW_ORPHAN_COSTS, SLOW_ORPHAN_WAITERS, START_ID, T, log, rt
+from .config import (AUTO_RECOVERY_RULES, FAIL_RESULTS, HORIZON, MAX_PUSH_ASIDE, MAX_SLOW, NEIGHBOUR_STALL_ISSUES,
+                     SLOW_MIN_GAP_S, SLOW_STALE_INTENTS, STAGE_FAIL_N)
+from .state import (CUR, DONE, EP, FB_LESSONS, GOAL_TARGET, ID_EVENTS, P, PATCH, PER, SLOW_JOB, SLOW_JOB_SEQ,
+                    SLOW_ORPHAN_COSTS, SLOW_ORPHAN_WAITERS, START_ID, T, log, nonfatal, rt, warn)
 
 
 def _next_slow_job_id():
@@ -37,7 +39,7 @@ def _apply_episode_plan(p, dep, source='slow'):
     On stall with identity confirmed: relook must run perception; never treat a log marker as a target refresh."""
     def f(d_, k, lo, hi, d):
         try: return float(np.clip(float(d_[k]), lo, hi))
-        except Exception: return d
+        except (KeyError, TypeError, ValueError): return d
     # Confirmed grasp: never apply neighbour/local-loop undo plans; keep hold → lift.
     if (EP.get('grasp_confirm') or EP.get('grasp_secured_once')) and EP.get('closed'):
         p = dict(p or {})
@@ -51,11 +53,9 @@ def _apply_episode_plan(p, dep, source='slow'):
         lift_name = 'lift' if 'lift' in {i['name'] for i in rt.LIB.get('intents', [])} else 'move_above_object'
         EP['force_next_intent'] = lift_name
         if not p.get('plan'):
-            try:
+            with nonfatal('grasp_secured_plan_skip_log'):
                 log(t=T[0], grasp_secured_plan_skip=True, source=source, force_next=lift_name,
                     grasp_confirm=bool(EP.get('grasp_confirm')))
-            except Exception:
-                pass
             return ['skip_plan_grasp_secured']
     igo = p.get('is_goal_object')
     if igo is True or str(igo).lower() == 'true': igo_n = True
@@ -112,20 +112,14 @@ def _apply_episode_plan(p, dep, source='slow'):
             vision._note_patch_mutation(f'{source}:adjust', dict(st))
             done_steps.append('adjust'); target_updated = True
         elif k in stall_steps:
-            try:
-                ns_fb, _ = observation.namespace()
-                det = recovery._apply_stall_feedback(ns_fb, f'{source}:{k}', action=k)
-                done_steps.append(f'{k}:{det.get("action")}'); target_updated = True
-            except Exception as ex:
-                done_steps.append(f'{k}_error:{ex}')
+            ns_fb, _ = observation.namespace()
+            det = recovery._apply_stall_feedback(ns_fb, f'{source}:{k}', action=k)
+            done_steps.append(f'{k}:{det.get("action")}'); target_updated = True
         elif k == 'push_aside':
-            try:
-                ns_fb, _ = observation.namespace()
-                det = recovery._apply_stall_feedback(ns_fb, f'{source}:push_aside', action='push_aside', plan_step=st, dep=dep)
-                done_steps.append(f"push_aside:{det.get('action')}:{det.get('error') or ('ok' if det.get('pushed') else 'noop')}")
-                target_updated = True
-            except Exception as ex:
-                done_steps.append(f'push_aside_error:{ex}')
+            ns_fb, _ = observation.namespace()
+            det = recovery._apply_stall_feedback(ns_fb, f'{source}:push_aside', action='push_aside', plan_step=st, dep=dep)
+            done_steps.append(f"push_aside:{det.get('action')}:{det.get('error') or ('ok' if det.get('pushed') else 'noop')}")
+            target_updated = True
         elif k == 'relook':
             # A real visual refresh replaces the old target. Remaining plan steps were
             # based on the old view, so return to Jev with a fresh namespace afterward.
@@ -133,13 +127,10 @@ def _apply_episode_plan(p, dep, source='slow'):
             return done_steps
     # Stall + identity confirmed ⇒ shared target MUST change (raise/shift/relook-refresh). Empty relook-only forbidden.
     if id_ok and stallish and not target_updated and AUTO_RECOVERY_RULES:
-        try:
-            ns_fb, _ = observation.namespace()
-            det = recovery._apply_stall_feedback(ns_fb, f'{source}:forced_target_update')
-            done_steps.append(f'forced_stall_feedback:{det.get("action")}')
-            target_updated = True
-        except Exception as ex:
-            done_steps.append(f'forced_stall_feedback_error:{ex}')
+        ns_fb, _ = observation.namespace()
+        det = recovery._apply_stall_feedback(ns_fb, f'{source}:forced_target_update')
+        done_steps.append(f'forced_stall_feedback:{det.get("action")}')
+        target_updated = True
     return done_steps
 
 
@@ -152,7 +143,8 @@ def _run_episode_start_plan():
     out = {'mode': mode, 'applied': False, 'plan_done': [], 'error': None}
     try:
         brief = JX.build_jev_experience_brief(rt.LIB, facts={}, ns={}, uses=EP.get('uses') or {}, dsl=dsl)
-    except Exception:
+    except Exception as ex:
+        warn('start_plan_brief', ex)
         brief = {}
     # Seed general start priors into the brief the planner sees (not task/brand hardcodes).
     try:
@@ -192,8 +184,8 @@ def _run_episode_start_plan():
             seed_ids.add(s['id'])
         brief = dict(brief)
         brief['lessons'] = priors[:8]
-    except Exception:
-        pass
+    except Exception as ex:
+        warn('start_plan_seed_priors', ex)
     _vfinal = START_ID.get('verify_after_relook') if START_ID.get('forced_relook') else START_ID.get('verify')
     start_hints = {
         'goal_id_confirmed': bool(vision.goal_id_confirmed()),
@@ -254,12 +246,10 @@ def _run_episode_start_plan():
         return out
     except Exception as ex:
         out['error'] = str(ex)[:400]
-        try:
+        with nonfatal('start_plan_error_record'):
             with open(os.path.join(rt.ep_dir, 'start_plan.json'), 'w') as plan_file:
                 json.dump(out, plan_file, indent=1, default=str)
             log(t=T[0], episode_start_plan_error=True, mode=mode, err=out['error'])
-        except Exception:
-            pass
         return out
 
 
@@ -443,12 +433,12 @@ def _log_slow_result(box):
 def _account_slow_rec(rec):
     if not rec:
         return
+    P['planning_calls'] += 1
+    P['last_planning_wall'] = time.time()
     try:
         P['planning_cost'] += float(rec.get('cost_usd') or 0.0)
-        P['planning_calls'] += 1
-        P['last_planning_wall'] = time.time()
-    except Exception:
-        pass
+    except (AttributeError, TypeError, ValueError) as ex:
+        warn('planning_cost', ex)
 
 
 def _drain_orphan_slow_costs():
@@ -494,10 +484,8 @@ def _abandon_async_slow(reason='abandon'):
         # Already finished: account cost, never apply
         _log_slow_result(box)
         _account_slow_rec(box.get('rec'))
-        try:
+        with nonfatal('async_discarded_log'):
             log(t=T[0], async_discarded_finished=True, **meta, issue=(box.get('parsed') or {}).get('issue'))
-        except Exception:
-            pass
     return True
 
 
@@ -617,13 +605,14 @@ def _sync_slow(intent, result, crit):
         import coding_agent_slow as CAS
         snapshot = _prepare_slow_snapshot(ctx, crit, 'sync', both, f'sync_{_next_slow_job_id()}')
         parsed, rec = CAS.call_monitor(snapshot['coding_context'], mode='codex')
-        log(t=T[0], coding_agent_slow=True, mode='codex', sync=True, crit=crit,
-            issue=parsed.get('issue'), intervene=parsed.get('intervene'),
-            plan=parsed.get('plan'), backend=rec.get('backend'))
-        return _finish_slow(parsed, rec, dep, both, intent, result, 'sync_codex', crit, rt.dec)
     except Exception as e:
         log(t=T[0], coding_agent_slow_error=True, mode='codex', sync=True, err=str(e)[:300])
         return f'sync_error:coding_agent:{e}', None
+    log(t=T[0], coding_agent_slow=True, mode='codex', sync=True, crit=crit,
+        issue=parsed.get('issue'), intervene=parsed.get('intervene'),
+        plan=parsed.get('plan'), backend=rec.get('backend'))
+    # Applying the reply moves the robot; failures there are harness errors, not Codex errors.
+    return _finish_slow(parsed, rec, dep, both, intent, result, 'sync_codex', crit, rt.dec)
 
 
 def do_slow_think(intent, result, force=False):
@@ -644,10 +633,8 @@ def do_slow_think(intent, result, force=False):
         EP['force_next_intent'] = lift_name
         out = {'issue': 'ok', 'intervene': False, 'mode': 'grasp_confirm_skip', 'crit': 'after_close',
                'grasp_confirm': True, 'force_next': lift_name}
-        try:
+        with nonfatal('grasp_confirm_skip_log'):
             log(t=T[0], slow_think='grasp_confirm_skip', intent=intent, intent_result=result, detail=out)
-        except Exception:
-            pass
         return 'ok', out
     if crit:
         # critical: do not apply a pending async view (may be stale vs post-close/release); sync on fresh stills

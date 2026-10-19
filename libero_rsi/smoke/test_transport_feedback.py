@@ -96,11 +96,12 @@ class TransportTests(unittest.TestCase):
                          [{'intent':'close_gripper','result':FAILED}])
         self.assertNotIn('carry_to_place',scope['_acting_menu']({x['name']:x for x in LIB['intents']}))
 
-    def test_confirmation_exception_cannot_report_closed_success(self):
+    def test_confirmation_exception_ends_episode_instead_of_reporting_a_result(self):
         scope,ep,_,_=fixture()
         def fail():raise RuntimeError('injected sensor failure')
         scope['_confirm_grasp_after_close']=fail
-        self.assertEqual(scope['execute']('close_gripper',scope['namespace']()[0]),FAILED)
+        with self.assertRaisesRegex(RuntimeError,'injected sensor failure'):
+            scope['execute']('close_gripper',scope['namespace']()[0])
         self.assertFalse(ep['grasp_confirm'])
 
     def test_confirmed_carry_moves_instead_of_returning_closed(self):

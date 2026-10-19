@@ -13,7 +13,7 @@ import motion_feedback as MF
 from . import pose, recovery, robot, vision
 from .config import (ASK_ASTRA_NAMES, CLOSE_NOT_READY, FINE_STEPS, MAX_RELOOK, MAX_SLOW, OPEN_MAX, RECOVERY_MODE, S,
                      TRANSPORT_INTENTS)
-from .state import DONE, EP, P, PATCH, PER, RSHAPE, T, log, rt
+from .state import DONE, EP, P, PATCH, PER, RSHAPE, T, log, rt, warn
 
 
 def namespace():
@@ -38,7 +38,9 @@ def namespace():
     preds = {}
     for p in rt.LIB.get('predicates', []):
         try: preds[p['name']] = bool(dsl.evaluate(p['expr'], {**ns, **preds}))
-        except Exception: preds[p['name']] = False
+        except Exception as ex:
+            warn('predicate', ex, once=True, name=p['name'])
+            preds[p['name']] = False
     ns.update(preds); return ns, preds
 
 
@@ -236,15 +238,19 @@ def _candidate_execution(menu, ns, state):
                 'command_transition_needed': (finger == 'open' and EP['closed']) or (finger == 'close' and not EP['closed'])})
             try:
                 target = np.asarray(dsl.evaluate(it['refpoint'], ns), float).reshape(3)
-            except Exception:
+            except Exception as ex:
+                warn('candidate_refpoint', ex, once=True, intent=name)
                 d['program_steps'].append({'return': 'refpoint_error', 'servo_motion': False})
                 d['conditional_effects'] = ['No movement target can be evaluated; this call cannot test descent.']
                 descriptions[name] = d
                 continue
             else:
                 def ev(key):
-                    try: return float(dsl.evaluate(str(it[key]), ns)) if key in it else None
-                    except Exception: return None
+                    if key not in it: return None
+                    try: return float(dsl.evaluate(str(it[key]), ns))
+                    except Exception as ex:
+                        warn('candidate_shape', ex, once=True, intent=name, field=key)
+                        return None
                 shape = {'tilt': ev('tilt_deg') or 0.0, 'tdir': ev('tilt_dir_deg') or 0.0, 'yaw': ev('yaw_deg')}
                 within = float(np.linalg.norm(target - tcp)) < .006
                 d['program_steps'].append({'operation': 'position_check_then_optional_servo',

@@ -7,6 +7,7 @@ Simulator handles and run arguments live on `rt`.
 """
 import json
 import queue
+from contextlib import contextmanager
 from copy import deepcopy
 
 import numpy as np
@@ -36,6 +37,31 @@ rt = Runtime()
 
 def log(**k):
     rt.logf.write(json.dumps(k, default=lambda o: np.asarray(o).round(4).tolist()) + '\n'); rt.logf.flush()
+
+
+NONFATAL = []  # diagnostics/fallback errors that did not change control flow; reported in result.json
+
+
+def warn(where, exc, once=False, **ctx):
+    """Record an error that is safe to continue past (diagnostics, documented fallbacks).
+
+    once=True records only the first occurrence per (where, ctx): for code re-evaluated every step."""
+    if once and any(r['where'] == where and all(r.get(k) == v for k, v in ctx.items()) for r in NONFATAL):
+        return
+    rec = {'where': where, 'error': f'{type(exc).__name__}: {exc}'[:300], 'step': T[0]}
+    rec.update(ctx)
+    NONFATAL.append(rec)
+    if rt.logf is not None and not rt.logf.closed:
+        log(t=T[0], ev='harness_warning', **rec)
+
+
+@contextmanager
+def nonfatal(where, **ctx):
+    """Wrap diagnostics-only code (logging, image dumps): failures are recorded, never swallowed silently."""
+    try:
+        yield
+    except Exception as exc:
+        warn(where, exc, **ctx)
 
 
 def _empty_patch():
@@ -114,7 +140,7 @@ def reset():
         target.clear(); target.update(deepcopy(value))
     for container in (PER, EP):
         container.clear()
-    for container in (ID_EVENTS, FB_LESSONS, SLOW_ORPHAN_WAITERS):
+    for container in (ID_EVENTS, FB_LESSONS, SLOW_ORPHAN_WAITERS, NONFATAL):
         container.clear()
     T[0] = 0; DONE[0] = False; SLOW_JOB_SEQ[0] = 0
     while not SLOW_ORPHAN_COSTS.empty():

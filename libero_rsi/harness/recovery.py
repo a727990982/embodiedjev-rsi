@@ -47,10 +47,7 @@ def _clear_reapproach_delta(ns):
 def _raise_tcp(scale=2.0, max_steps=40):
     """Lift gripper in place (open or closed as currently commanded)."""
     up_z = max(scale * float(PER.get('obj_h', 0.05)), 0.06)
-    try:
-        robot.servo(robot.eef() + np.array([0.0, 0.0, up_z]), -1.0 if not EP['closed'] else 1.0, 1.0, max_steps=max_steps, tol=0.01)
-    except Exception:
-        pass
+    robot.servo(robot.eef() + np.array([0.0, 0.0, up_z]), -1.0 if not EP['closed'] else 1.0, 1.0, max_steps=max_steps, tol=0.01)
     return up_z
 
 
@@ -136,22 +133,17 @@ def _local_deadend_should_trigger(pending_action=None, check_grasp=True):
 
 def _retreat_for_global_view(scale=4.5):
     """Back away upward so the fixed front camera sees the scene (not wrist-stuck pose)."""
-    try:
-        if EP.get('closed') and not (bool(PER.get('seen_held')) or EP.get('grasp_confirm') or EP.get('grasp_secured_once')):
-            EP['closed'] = False
-            robot.grip(-1, 12)
-    except Exception:
-        pass
+    if EP.get('closed') and not (bool(PER.get('seen_held')) or EP.get('grasp_confirm') or EP.get('grasp_secured_once')):
+        EP['closed'] = False
+        robot.grip(-1, 12)
     raised = _raise_tcp(scale, max_steps=50)
     # Extra lift toward a safer clearance above current grasp estimate
-    try:
-        tcp = robot.eef()
-        oh = float(PER.get('obj_h', 0.05) or 0.05)
-        tgt = tcp.copy()
-        tgt[2] = max(float(tcp[2]), float((PER.get('grasp') or tcp)[2]) + max(3.0 * oh, 0.12))
-        robot.servo(tgt, -1.0 if not EP['closed'] else 1.0, 1.0, max_steps=40, tol=0.015)
-    except Exception:
-        pass
+    tcp = robot.eef()
+    oh = float(PER.get('obj_h', 0.05) or 0.05)
+    grasp = PER.get('grasp')
+    tgt = tcp.copy()
+    tgt[2] = max(float(tcp[2]), float((tcp if grasp is None else grasp)[2]) + max(3.0 * oh, 0.12))
+    robot.servo(tgt, -1.0 if not EP['closed'] else 1.0, 1.0, max_steps=40, tol=0.015)
     return raised
 
 
@@ -191,37 +183,26 @@ def _local_deadend_global_relook_sync_slow(reason, ns=None):
     intent = 'local_deadend_global_relook'
     result = f'deadend:{reason}'
     crit = f'local_deadend_global_relook:{reason}'
-    try:
-        # Enrich last markers so _slow_ctx / mock see the deadend
-        EP['last_stall_issue'] = None  # cleared; slow should replan from global stills
-        sr, so = planning._sync_slow(intent, result, crit=crit)
-        detail['slow_result'] = sr
-        detail['slow_detail'] = {
-            'issue': (so or {}).get('issue') if isinstance(so, dict) else None,
-            'intervene': (so or {}).get('intervene') if isinstance(so, dict) else None,
-            'plan_done': (so or {}).get('plan_done') if isinstance(so, dict) else None,
-            'crit': (so or {}).get('crit') if isinstance(so, dict) else crit,
-            'mode': (so or {}).get('mode') if isinstance(so, dict) else None,
-        }
-        if sr == 'ok':
-            assist._consume_help_budget(crit)
-        # If sync slow unavailable (cap/disabled), at least force re-approach from above
-        if sr in ('slow_cap', 'slow_cap_drop', None) or (isinstance(sr, str) and sr.startswith('sync_error')):
-            if not EP.get('force_next_intent'):
-                EP['force_next_intent'] = 'move_above_object'
-            # Soft fallback: raise_redescend once without push
-            try:
-                ns_fb, _ = observation.namespace()
-                _apply_stall_feedback(ns_fb, f'{crit}:fallback_raise', action='raise_redescend')
-            except Exception as ex:
-                detail['fallback_raise_error'] = str(ex)[:200]
-    except NameError:
-        # _sync_slow not yet bound (should not happen at runtime) — still force re-approach
-        EP['force_next_intent'] = 'move_above_object'
-        detail['slow_result'] = 'sync_slow_unavailable'
-    except Exception as ex:
-        detail['slow_result'] = f'sync_error:{ex}'
-        EP['force_next_intent'] = 'move_above_object'
+    EP['last_stall_issue'] = None  # cleared; slow should replan from global stills
+    # _sync_slow reports Codex failures as 'sync_error:...'; anything raised here is a motion/state error.
+    sr, so = planning._sync_slow(intent, result, crit=crit)
+    detail['slow_result'] = sr
+    detail['slow_detail'] = {
+        'issue': (so or {}).get('issue') if isinstance(so, dict) else None,
+        'intervene': (so or {}).get('intervene') if isinstance(so, dict) else None,
+        'plan_done': (so or {}).get('plan_done') if isinstance(so, dict) else None,
+        'crit': (so or {}).get('crit') if isinstance(so, dict) else crit,
+        'mode': (so or {}).get('mode') if isinstance(so, dict) else None,
+    }
+    if sr == 'ok':
+        assist._consume_help_budget(crit)
+    # If sync slow unavailable (cap/disabled), at least force re-approach from above
+    if sr in ('slow_cap', 'slow_cap_drop', None) or (isinstance(sr, str) and sr.startswith('sync_error')):
+        if not EP.get('force_next_intent'):
+            EP['force_next_intent'] = 'move_above_object'
+        # Soft fallback: raise_redescend once without push
+        ns_fb, _ = observation.namespace()
+        _apply_stall_feedback(ns_fb, f'{crit}:fallback_raise', action='raise_redescend')
     if not EP.get('force_next_intent'):
         EP['force_next_intent'] = 'move_above_object'
     CUR.update(fb=f"DEADEND→GLOBAL+SYNC_SLOW:{reason}"[:170], fb_t=T[0],
@@ -266,14 +247,13 @@ def _push_dir_xy_from_ns(ns):
         return open_ax
     if r and not l:
         return -open_ax
-    try:
-        tcp = np.asarray(ns.get('tcp', robot.eef()), float)
-        objc = np.asarray(ns.get('objc', PER.get('objc', tcp)), float)
-        delta = tcp[:2] - objc[:2]
-        if float(np.linalg.norm(delta)) > 1e-4:
-            return delta / (float(np.linalg.norm(delta)) + 1e-9)
-    except Exception:
-        pass
+    tcp = np.asarray(ns.get('tcp', robot.eef()), float)
+    objc = ns.get('objc', PER.get('objc'))
+    if objc is None:
+        return open_ax
+    delta = tcp[:2] - np.asarray(objc, float)[:2]
+    if float(np.linalg.norm(delta)) > 1e-4:
+        return delta / (float(np.linalg.norm(delta)) + 1e-9)
     return open_ax
 
 
@@ -297,10 +277,7 @@ def _choose_stall_feedback(ns):
     last = str((ns or {}).get('last_result') or EP.get('last_result') or '')
     n = int(EP.get('stall_feedbacks', 0))
     n_clear = int(EP.get('clear_reapproach_n', 0))
-    try:
-        id_ok = bool(vision.goal_id_confirmed())
-    except Exception:
-        id_ok = False
+    id_ok = bool(vision.goal_id_confirmed())
     issue = str(EP.get('last_stall_issue') or '')
     neighbour_issue = issue in NEIGHBOUR_STALL_ISSUES
 
@@ -365,10 +342,7 @@ def _execute_push_aside(ns, reason='stall', plan_step=None, dep=None):
         _raise_tcp(2.0)
         EP['force_next_intent'] = 'move_above_object'
         return detail
-    try:
-        id_ok = bool(vision.goal_id_confirmed())
-    except Exception:
-        id_ok = False
+    id_ok = bool(vision.goal_id_confirmed())
     if not id_ok:
         detail['error'] = 'push_aside_refused_identity'
         _raise_tcp(2.0)
@@ -383,10 +357,7 @@ def _execute_push_aside(ns, reason='stall', plan_step=None, dep=None):
     holding_verified = bool(EP.get('closed')) and bool(PER.get('seen_held')) and id_ok
     if EP.get('closed') and not holding_verified:
         detail['error'] = 'push_aside_refused_unverified_hold'
-        try:
-            EP['closed'] = False; robot.grip(-1, 15); EP['released'] = True
-        except Exception:
-            pass
+        EP['closed'] = False; robot.grip(-1, 15); EP['released'] = True
         _raise_tcp(2.0)
         EP['force_next_intent'] = 'move_above_object'
         return detail
@@ -396,13 +367,10 @@ def _execute_push_aside(ns, reason='stall', plan_step=None, dep=None):
         return detail
 
     # Keep grip OPEN during neighbour push (safer than closing on a non-goal).
-    try:
-        if EP.get('closed'):
-            EP['closed'] = False; robot.grip(-1, 15)
-        else:
-            robot.grip(-1, 8)
-    except Exception:
-        pass
+    if EP.get('closed'):
+        EP['closed'] = False; robot.grip(-1, 15)
+    else:
+        robot.grip(-1, 8)
 
     EP['push_aside_n'] = int(EP.get('push_aside_n', 0)) + 1
     EP['push_aside_approach_n'] = int(EP.get('push_aside_approach_n', 0)) + 1
@@ -414,7 +382,7 @@ def _execute_push_aside(ns, reason='stall', plan_step=None, dep=None):
     st = plan_step or {}
     try:
         dist_objw = float(np.clip(float(st.get('distance_objw', 1.0)), 0.5, 2.0))
-    except Exception:
+    except (TypeError, ValueError):
         dist_objw = 1.0
 
     used_astra = False
@@ -437,7 +405,7 @@ def _execute_push_aside(ns, reason='stall', plan_step=None, dep=None):
             used_astra = True
             detail['blocker_mode'] = 'astra_px'
             detail['direction'] = dn
-        except Exception as ex:
+        except (KeyError, TypeError, ValueError, IndexError) as ex:
             detail['astra_blocker_error'] = str(ex)
             used_astra = False
 
@@ -454,27 +422,17 @@ def _execute_push_aside(ns, reason='stall', plan_step=None, dep=None):
 
     L = dist_objw * ow
     g_open = -1.0
-    try:
-        # Approach from above, descend open, shove laterally, raise clear.
-        robot.servo(start + np.array([0.0, 0.0, 2.0 * oh]), g_open, 1.0, max_steps=40, tol=0.01)
-        robot.servo(start, g_open, 0.5, max_steps=40, tol=0.01)
-        r = robot.servo(start + v * (L + 1.0 * ow), g_open, 0.4, max_steps=50, tol=0.015)
-        robot.servo(robot.eef() + np.array([0.0, 0.0, 2.0 * oh]), g_open, 1.0, max_steps=40, tol=0.01)
-        detail['servo'] = r
-        detail['pushed'] = True
-        detail['distance_objw'] = dist_objw
-    except Exception as ex:
-        detail['error'] = f'push_aside_motion:{ex}'
-        try:
-            _raise_tcp(2.5)
-        except Exception:
-            pass
+    # Approach from above, descend open, shove laterally, raise clear.
+    robot.servo(start + np.array([0.0, 0.0, 2.0 * oh]), g_open, 1.0, max_steps=40, tol=0.01)
+    robot.servo(start, g_open, 0.5, max_steps=40, tol=0.01)
+    r = robot.servo(start + v * (L + 1.0 * ow), g_open, 0.4, max_steps=50, tol=0.015)
+    robot.servo(robot.eef() + np.array([0.0, 0.0, 2.0 * oh]), g_open, 1.0, max_steps=40, tol=0.01)
+    detail['servo'] = r
+    detail['pushed'] = True
+    detail['distance_objw'] = dist_objw
 
     # Always reopen (should already be open) and force re-approach before any close.
-    try:
-        EP['closed'] = False; robot.grip(-1, 10)
-    except Exception:
-        EP['closed'] = False
+    EP['closed'] = False; robot.grip(-1, 10)
     _mark_need_reapproach_after_push(f'after_push_aside:{reason}')
     EP['force_next_intent'] = 'move_above_object'
     detail['need_reapproach'] = True
@@ -494,10 +452,7 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
         action = None
     action = action or _choose_stall_feedback(ns)
     # Progress bookkeeping
-    try:
-        grasping._note_grasp_progress(ns)
-    except Exception:
-        pass
+    grasping._note_grasp_progress(ns)
     # Confirmed grasp: never undo with neighbour/local-loop stall feedback — go lift/carry.
     if EP.get('grasp_confirm') or (EP.get('grasp_secured_once') and EP.get('closed') and grasping._grasp_secured_now(ns)):
         lift_name = 'lift' if 'lift' in {i['name'] for i in rt.LIB.get('intents', [])} else 'move_above_object'
@@ -552,11 +507,8 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
         dx, dy = float(delta[0] / nrm) * 0.35, float(delta[1] / nrm) * 0.35
         detail['grasp_dxy_objw'] = _nudge_grasp_xy(dx, dy)
         PATCH['grasp_dz_objh'] = float(np.clip(float(PATCH.get('grasp_dz_objh') or 0.0) + 0.1, -0.5, 0.5))
-        try:
-            tgt = robot.eef().copy(); tgt[:2] = tcp[:2] + np.array([dx, dy]) * ow; tgt[2] = tcp[2] + max(float(PER.get('obj_h', 0.05)), 0.04)
-            robot.servo(tgt, grip, 1.0, max_steps=40, tol=0.01)
-        except Exception:
-            _raise_tcp(2.0)
+        tgt = robot.eef().copy(); tgt[:2] = tcp[:2] + np.array([dx, dy]) * ow; tgt[2] = tcp[2] + max(float(PER.get('obj_h', 0.05)), 0.04)
+        robot.servo(tgt, grip, 1.0, max_steps=40, tol=0.01)
         detail['grasp_dz_objh'] = PATCH['grasp_dz_objh']
         EP['force_next_intent'] = 'move_above_object'
 
@@ -621,10 +573,7 @@ def _apply_stall_feedback(ns, reason, action=None, plan_step=None, dep=None):
             'after': {'tcp_xyz_m': robot.eef().tolist(), 'commanded_orientation_deg': vision._motion_orientation()},
             'status': 'preparation_attempted_descent_unverified',
         }
-    try:
-        _record_local_stall_family(action)
-    except Exception:
-        pass
+    _record_local_stall_family(action)
     log(t=T[0], stall_feedback=True, **detail, goal_target=dict(GOAL_TARGET),
         local_fb_family_hist=list(EP.get('local_fb_family_hist') or []))
     # Post-action deadend: N consecutive local loops just completed
@@ -652,11 +601,8 @@ def _escape_identity_deadlock(reason):
     detail = {'reason': reason, 'escape_n': EP['escapes'], 'relooks': P['relook'], 'close_refusals': GOAL_ID.get('close_refusals', 0)}
     if EP['escapes'] > MAX_ESCAPE:
         # Still move (raise) so we do not freeze, but stop burning Astra.
-        try:
-            up_z = max(2.0 * float(PER.get('obj_h', 0.05)), 0.06)
-            robot.servo(robot.eef() + np.array([0.0, 0.0, up_z]), -1.0 if not EP['closed'] else 1.0, 1.0, max_steps=30, tol=0.01)
-        except Exception:
-            pass
+        up_z = max(2.0 * float(PER.get('obj_h', 0.05)), 0.06)
+        robot.servo(robot.eef() + np.array([0.0, 0.0, up_z]), -1.0 if not EP['closed'] else 1.0, 1.0, max_steps=30, tol=0.01)
         EP['force_next_intent'] = 'retreat' if 'retreat' in {i['name'] for i in rt.LIB['intents']} else 'move_above_object'
         log(t=T[0], identity_escape='raise_only_cap', **detail)
         return 'identity_escape_cap'

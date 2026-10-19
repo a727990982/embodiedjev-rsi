@@ -190,7 +190,9 @@ front/wrist views and step/action captions. Encoding uses one CPU thread. Set
 exit code. A missing ffmpeg fails before model calls instead of silently omitting
 the recording.
 
-A failed start plan stops the episode before Jev decisions and is recorded as `harness_error`. Libraries are validated before environment creation. Recovery-rule errors are logged and end the episode with `harness_error`, rather than silently continuing with potentially partial state changes.
+A failed start plan stops the episode before Jev decisions and is recorded as `harness_error`. Libraries are validated before environment creation. Recovery-rule errors are logged and end the episode with `harness_error`, rather than silently continuing with potentially partial state changes. The same applies to any exception from robot motion, grasp confirmation, stall feedback, or place-phase bookkeeping: the traceback goes to `result.json` under `error`.
+
+Only two kinds of failure are survivable. External model calls (Astra perception, identity checks, Codex planning) have their documented fallback results such as `relook_error` or `sync_error:...`. Diagnostics (log records, image dumps, environment teardown) and library DSL fallbacks (a predicate that fails evaluates to false; a bad `gain` uses 1.0) are recorded rather than swallowed: each one appears as a `harness_warning` line in `decisions.jsonl` and in the `nonfatal_errors` list in `result.json`.
 
 ## Fine-step menu
 

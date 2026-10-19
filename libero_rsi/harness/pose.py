@@ -8,7 +8,7 @@ import os
 import numpy as np
 
 from . import robot, vision
-from .state import EP, PATCH, PER, RSHAPE, SHAPE, T, log, rt
+from .state import EP, PATCH, PER, RSHAPE, SHAPE, T, log, nonfatal, rt
 
 
 def _pose_menu_enabled():
@@ -94,10 +94,7 @@ def _pose_menu_tip(lib):
 def _pose_menu_visible():
     if _pose_menu_enabled():
         return True
-    try:
-        return any(i.get('action') == 'pose_menu' for i in rt.LIB.get('intents', []))
-    except Exception:
-        return False
+    return any(i.get('action') == 'pose_menu' for i in (rt.LIB or {}).get('intents', []))
 
 
 def _install_pose_menu(lib):
@@ -193,7 +190,7 @@ def _pose_clearance_m(name):
     env_key = {'small': 'POSE_CLEAR_SMALL_M', 'medium': 'POSE_CLEAR_MEDIUM_M', 'large': 'POSE_CLEAR_LARGE_M'}[name]
     try:
         return float(os.environ.get(env_key, defaults[name]))
-    except Exception:
+    except ValueError:
         return float(defaults[name])
 
 
@@ -222,7 +219,7 @@ def _finite3(v):
     try:
         a = np.asarray(v, float).reshape(-1)
         return a.size >= 3 and bool(np.all(np.isfinite(a[:3])))
-    except Exception:
+    except (TypeError, ValueError):
         return False
 
 
@@ -230,10 +227,8 @@ def _pose_note(kind, text):
     EP['pose_menu_note'] = text
     counts = EP.setdefault('pose_menu_counts', {})
     counts[kind] = int(counts.get(kind, 0)) + 1
-    try:
+    with nonfatal('pose_menu_log'):
         log(t=T[0], pose_menu=True, kind=kind, outcome=text)
-    except Exception:
-        pass
     return text
 
 
@@ -256,10 +251,7 @@ def _execute_pose_menu(it, ns):
             new_yaw, step = _yaw_step(cur, float(it.get('yaw_delta_deg', 0)))
             label = f'in-place rotate {step:+.1f} deg'
         PATCH['yaw_deg'] = float(new_yaw)
-        try:
-            result = robot.servo(hold, grip, 0.6, max_steps=80, tol=0.01, ori_tol=0.08)
-        except Exception as ex:
-            result = f'pose_menu_error:{ex}'
+        result = robot.servo(hold, grip, 0.6, max_steps=80, tol=0.01, ori_tol=0.08)
         _pose_note(kind, f'{label}: commanded yaw {cur:.1f} -> {new_yaw:.1f}; position held; servo {result}')
         return result
     if pose == 'align':
@@ -270,47 +262,34 @@ def _execute_pose_menu(it, ns):
         clearance_name = str(it.get('clearance') or 'medium')
         try:
             clearance = _pose_clearance_m(clearance_name)
-        except Exception:
+        except KeyError:
             _pose_note(kind, f'align refused: unknown clearance {clearance_name}')
             return 'pose_menu_bad_clearance'
         tcp = np.asarray(ns.get('tcp', robot.eef()), float)
-        try:
-            cam = np.asarray(rt.CP, float).reshape(-1)[:2]
-        except Exception:
-            cam = None
-        try:
-            home_xy = np.asarray(rt.HOME_EEF, float).reshape(-1)[:2]
-        except Exception:
-            home_xy = tcp[:2]
+        cam = None if rt.CP is None else np.asarray(rt.CP, float).reshape(-1)[:2]
+        home_xy = tcp[:2] if rt.HOME_EEF is None else np.asarray(rt.HOME_EEF, float).reshape(-1)[:2]
         try:
             tgt, yaw = _align_target(side, clearance, tcp, PER['grasp'], PER['objc'], PER['obj_h'], home_xy, cam)
-        except Exception as ex:
+        except ValueError as ex:
             _pose_note(kind, f'align refused: {ex}')
             return 'pose_menu_bad_side'
         if yaw is not None:
             PATCH['yaw_deg'] = float(yaw)
-        try:
-            result = robot.servo(tgt, grip, 0.8, max_steps=80, tol=0.01, ori_tol=0.08 if yaw is not None else None)
-        except Exception as ex:
-            result = f'pose_menu_error:{ex}'
+        result = robot.servo(tgt, grip, 0.8, max_steps=80, tol=0.01, ori_tol=0.08 if yaw is not None else None)
         where = 'above object top centre' if side == 'top' else 'height held and gripper yaw faces the object'
         _pose_note(kind, (
             f'align {side} clearance {clearance_name} ({clearance:.3f} m): '
             f'target {[round(float(x), 3) for x in tgt]}; {where}; servo {result}'))
         return result
     if pose == 'home':
-        try:
-            home = np.asarray(rt.HOME_EEF, float).reshape(3).copy()
-        except Exception:
+        if rt.HOME_EEF is None:
             _pose_note(kind, 'return home refused: initial end-effector pose was not captured')
             return 'pose_menu_no_home'
+        home = np.asarray(rt.HOME_EEF, float).reshape(3).copy()
         PATCH['yaw_deg'] = 0.0
         PATCH['tilt_deg'] = 0.0
         PATCH['tilt_dir_deg'] = 0.0
-        try:
-            result = robot.servo(home, grip, 1.0, max_steps=80, tol=0.01, ori_tol=0.08)
-        except Exception as ex:
-            result = f'pose_menu_error:{ex}'
+        result = robot.servo(home, grip, 1.0, max_steps=80, tol=0.01, ori_tol=0.08)
         if result == 'reached':
             for key in ('yaw_deg','tilt_deg','tilt_dir_deg'): PATCH[key] = None
             for key in ('yaw','tilt','tdir'):

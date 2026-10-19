@@ -15,7 +15,8 @@ import task_todo as TODO
 
 from . import observation, robot
 from .config import ASTRA_EFFORT, MAX_ESCAPE_LOOK, MAX_RELOOK, PLACE_CLEARANCE_DEFAULT, REAPPROACH_XY_M, S, YAW_EXPLICIT_EPS_DEG
-from .state import _empty_patch, EP, GOAL_ID, GOAL_TARGET, ID_EVENTS, P, PATCH, PER, RSHAPE, SHAPE, START_ID, T, log, rt
+from .state import (_empty_patch, EP, GOAL_ID, GOAL_TARGET, ID_EVENTS, P, PATCH, PER, RSHAPE, SHAPE, START_ID, T, log,
+                    nonfatal, rt, warn)
 
 
 def identity_fields(p):
@@ -81,10 +82,8 @@ def _reset_patch(reason='relook_overwrite'):
     old = {k: (list(v) if isinstance(v, list) else v) for k, v in PATCH.items()}
     PATCH.clear(); PATCH.update(_empty_patch())
     GOAL_TARGET['rev'] = int(GOAL_TARGET.get('rev', 0)) + 1
-    try:
+    with nonfatal('patch_reset_log'):
         log(t=T[0], patch_reset=True, reason=reason, old_patch=old, goal_target=dict(GOAL_TARGET))
-    except Exception:
-        pass
     return old
 
 
@@ -104,7 +103,7 @@ def _new_keypoints_explicit_yaw(p, old_per_yaw, cmd_yaw=None, eps=YAW_EXPLICIT_E
         if old_per_yaw is not None and abs(new_y - float(old_per_yaw)) < float(eps):
             return False  # relook echoed PER/default — do not reset confirmed PATCH to 0
         return True
-    except Exception:
+    except (TypeError, ValueError):
         return False
 
 
@@ -119,7 +118,7 @@ def _restore_approach_pose(old_patch, *, explicit_new_yaw):
             try:
                 PATCH[k] = float(v)
                 restored[k] = PATCH[k]
-            except Exception:
+            except (TypeError, ValueError):
                 pass
     return restored
 
@@ -131,18 +130,13 @@ def _commit_keypoints(p, dep, source, held_now=False):
     A material target XY change while open marks need_reapproach so close cannot fire at the old TCP."""
     old_patch = {k: (list(v) if isinstance(v, list) else v) for k, v in PATCH.items()}
     old_per_yaw = PER.get('yaw')
-    old_grasp = None
-    try:
-        if 'grasp' in PER:
-            old_grasp = np.asarray(PER['grasp'], float).copy()
-    except Exception:
-        old_grasp = None
+    old_grasp = np.asarray(PER['grasp'], float).copy() if PER.get('grasp') is not None else None
     # Capture commanded yaw BEFORE reset clears PATCH (needed for explicit-yaw gate).
     try:
         old_cmd_yaw = float(old_patch['yaw_deg']) if old_patch.get('yaw_deg') is not None else (
             float(RSHAPE['yaw']) if RSHAPE.get('yaw') is not None else float(PER.get('yaw', 0.0) or 0.0)
         )
-    except Exception:
+    except (TypeError, ValueError):
         old_cmd_yaw = old_per_yaw
     set_perc(p, dep, held_now=held_now)
     src = str(source or 'unknown')
@@ -158,13 +152,11 @@ def _commit_keypoints(p, dep, source, held_now=False):
             explicit = _new_keypoints_explicit_yaw(p, old_per_yaw, cmd_yaw=old_cmd_yaw)
         preserved = _restore_approach_pose(old_patch, explicit_new_yaw=explicit)
         GOAL_TARGET['source'] = 'relook'
-        try:
+        with nonfatal('approach_pose_log'):
             log(t=T[0], approach_pose_preserve=True, source=src, explicit_new_yaw=explicit,
                 old_per_yaw=old_per_yaw, new_per_yaw=PER.get('yaw'),
                 old_patch_yaw=old_patch.get('yaw_deg'), preserved=preserved or None,
                 goal_target=dict(GOAL_TARGET))
-        except Exception:
-            pass
     else:
         GOAL_TARGET['source'] = 'episode_start'
     GOAL_TARGET['base_from'] = src
@@ -172,17 +164,12 @@ def _commit_keypoints(p, dep, source, held_now=False):
     # Skip start-seed commits (EP is still empty); only mid-episode refreshes can unlock a stale close.
     if (not is_start and not held_now and src not in ('perceive_start_relook',)
             and 'need_reapproach' in EP):
-        try:
-            _mark_reapproach_if_needed(old_grasp, f'keypoints:{src}')
-        except Exception:
-            pass
-    try:
+        _mark_reapproach_if_needed(old_grasp, f'keypoints:{src}')
+    with nonfatal('commit_keypoints_log'):
         log(t=T[0], goal_commit_keypoints=True, source=src, goal_target=dict(GOAL_TARGET),
             approach_preserved=preserved or None,
             need_reapproach=bool(EP.get('need_reapproach')),
             grasp=list(np.asarray(PER.get('grasp'), float).round(4)) if 'grasp' in PER else None)
-    except Exception:
-        pass
     return dict(GOAL_TARGET)
 
 
@@ -191,10 +178,8 @@ def _note_patch_mutation(source, detail=None):
     GOAL_TARGET['source'] = 'slow_patch'
     GOAL_TARGET['last_patch_from'] = str(source or 'patch')
     GOAL_TARGET['rev'] = int(GOAL_TARGET.get('rev', 0)) + 1
-    try:
+    with nonfatal('patch_mutation_log'):
         log(t=T[0], goal_patch_mutation=True, source=source, detail=detail, patch=dict(PATCH), goal_target=dict(GOAL_TARGET))
-    except Exception:
-        pass
     return dict(GOAL_TARGET)
 
 
@@ -216,7 +201,7 @@ def verify_grasp_identity(p, rgb, phase='perceive_start_verify'):
     from PIL import ImageDraw as _ID
     im = Image.fromarray(rgb.copy()); d = _ID.Draw(im)
     try: u, v = int(round(p['grasp_px'][0])), int(round(p['grasp_px'][1]))
-    except Exception: return {'confirmed': None, 'reason': 'no_grasp_px'}, rgb
+    except (KeyError, TypeError, ValueError, IndexError): return {'confirmed': None, 'reason': 'no_grasp_px'}, rgb
     r = 14; d.ellipse([u - r, v - r, u + r, v + r], outline=(255, 0, 0), width=3)
     d.line([u - 18, v, u + 18, v], fill=(255, 0, 0), width=2); d.line([u, v - 18, u, v + 18], fill=(255, 0, 0), width=2)
     d.text((6, 6), 'RED MARK = proposed grasp', fill=(255, 0, 0))
@@ -248,16 +233,15 @@ def _reapproach_tol():
 
 def _tcp_near_grasp(tcp=None, grasp=None, tol=None):
     """True when TCP XY is close enough to the effective grasp to allow close."""
-    try:
-        tcp = robot.eef() if tcp is None else np.asarray(tcp, float)
-        if grasp is None:
-            dxy = PATCH.get('grasp_dxy_objw') or [0.0, 0.0]
-            grasp = PER['grasp'] + np.array([float(dxy[0]) * PER['obj_w'], float(dxy[1]) * PER['obj_w'],
-                                            (PATCH['grasp_dz_objh'] + RSHAPE['dz']) * PER['obj_h']])
-        tol = float(tol if tol is not None else _reapproach_tol())
-        return float(np.linalg.norm(_xy(tcp) - _xy(grasp))) <= tol
-    except Exception:
+    if grasp is None and any(PER.get(k) is None for k in ('grasp', 'obj_w', 'obj_h')):
         return False
+    tcp = robot.eef() if tcp is None else np.asarray(tcp, float)
+    if grasp is None:
+        dxy = PATCH.get('grasp_dxy_objw') or [0.0, 0.0]
+        grasp = PER['grasp'] + np.array([float(dxy[0]) * PER['obj_w'], float(dxy[1]) * PER['obj_w'],
+                                        (PATCH['grasp_dz_objh'] + RSHAPE['dz']) * PER['obj_h']])
+    tol = float(tol if tol is not None else _reapproach_tol())
+    return float(np.linalg.norm(_xy(tcp) - _xy(grasp))) <= tol
 
 
 def _clear_reapproach_if_aligned(reason='aligned'):
@@ -266,10 +250,8 @@ def _clear_reapproach_if_aligned(reason='aligned'):
     if _tcp_near_grasp():
         EP['need_reapproach'] = False
         EP['reapproach_reason'] = None
-        try:
+        with nonfatal('reapproach_cleared_log'):
             log(t=T[0], reapproach_cleared=True, reason=reason, goal_target=dict(GOAL_TARGET))
-        except Exception:
-            pass
         return True
     return False
 
@@ -282,16 +264,10 @@ def _mark_reapproach_if_needed(old_grasp, reason):
     new_g = PER.get('grasp')
     if new_g is None:
         return False
-    try:
-        near = _tcp_near_grasp(grasp=new_g)
-    except Exception:
-        near = False
+    near = _tcp_near_grasp(grasp=new_g)
     shifted = False
     if old_grasp is not None:
-        try:
-            shifted = float(np.linalg.norm(_xy(new_g) - _xy(old_grasp))) >= _reapproach_tol()
-        except Exception:
-            shifted = True
+        shifted = float(np.linalg.norm(_xy(new_g) - _xy(old_grasp))) >= _reapproach_tol()
     # Block close whenever TCP is not aligned to the refreshed target (covers identity change and large shift).
     if near and not shifted:
         return False
@@ -302,13 +278,11 @@ def _mark_reapproach_if_needed(old_grasp, reason):
     EP['reapproach_rev'] = int(GOAL_TARGET.get('rev', 0))
     if EP.get('force_next_intent') == 'close_gripper':
         EP['force_next_intent'] = 'move_above_object'
-    try:
+    with nonfatal('need_reapproach_log'):
         log(t=T[0], need_reapproach=True, reason=EP['reapproach_reason'], rev=EP['reapproach_rev'],
             old_grasp=list(np.asarray(old_grasp, float).round(4)) if old_grasp is not None else None,
             new_grasp=list(np.asarray(new_g, float).round(4)),
             tcp=list(np.asarray(robot.eef(), float).round(4)), goal_target=dict(GOAL_TARGET))
-    except Exception:
-        pass
     return True
 
 
@@ -370,14 +344,13 @@ def _global_front_relook(reason):
         set_goal_id(matched, 'global_relook', idf)
         Image.fromarray(rgb).save(os.path.join(rt.ep_dir, f'{tag}.jpg'))
         # Also save combo (front|wrist) for slow-think stills
-        try:
+        with nonfatal('global_relook_combo_save'):
             both, _, _ = robot._combo_rgb()
             Image.fromarray(both).save(os.path.join(rt.ep_dir, f'{tag}_combo.jpg'))
-        except Exception:
-            pass
         detail.update(matched=matched, phase=phase, tag=tag, identity=idf)
         return detail, dep
     except Exception as ex:
+        warn('global_front_relook', ex, reason=reason)
         detail['error'] = str(ex)[:300]
         return detail, None
 
@@ -404,6 +377,7 @@ def _escape_look(reason):
         Image.fromarray(rgb).save(os.path.join(rt.ep_dir, f'escape{EP["escape_looks"]}.jpg'))
         return 'escape_looked_matched' if matched else 'escape_looked_unmatched'
     except Exception as e:
+        warn('escape_look', e, reason=reason)
         return f'escape_look_error:{e}'
 
 
@@ -411,7 +385,7 @@ def _relook_approach_context(reason):
     """Stall + current commanded approach for relook/escape prompts. Do not silently revert a working yaw."""
     try:
         yaw = float(_cmd_yaw_deg())
-    except Exception:
+    except (TypeError, ValueError):
         yaw = float(PER.get('yaw') or 0.0)
     tilt = PATCH.get('tilt_deg')
     if tilt is None:
@@ -474,19 +448,19 @@ def do_relook(reason):
         set_goal_id(matched, 'relook', idf)
         Image.fromarray(rgb).save(os.path.join(rt.ep_dir, f'relook{P["relook"]}.jpg'))
         return 'relooked_matched' if matched else 'relooked_unmatched'
-    except Exception as e: return 'relook_error'
+    except Exception as e:
+        warn('relook', e, reason=reason)
+        return 'relook_error'
 
 
 def start_identity_check():
     """Start-of-episode identity-checked perception (general library knowledge; not fallback-only)."""
     rt.per0, rt.RGB0, rt.DEP0 = perceive(phase='perceive_start')
     Image.fromarray(rt.RGB0).save(os.path.join(rt.ep_dir, 'start.jpg'))
-    try:
+    with nonfatal('start_wrist_save'):
         _wr0 = rt.obs.get('robot0_eye_in_hand_image')
         if _wr0 is not None:
             Image.fromarray(_wr0[::-1]).save(os.path.join(rt.ep_dir, 'start_wrist.jpg'))
-    except Exception:
-        pass
     START_ID['attempts'].append({**identity_fields(rt.per0), 'phase': 'perceive_start'})
     ID_EVENTS.append({'where': 'start', **identity_fields(rt.per0)})
     # Always verify the locked grasp pixel against the language goal (overconfident wrong locks are the soup failure mode)
@@ -502,6 +476,7 @@ def start_identity_check():
                               'reason': vrec.get('reason')}
         ID_EVENTS.append({'where': 'start_verify', **START_ID['verify']})
     except Exception as ex:
+        warn('start_verify', ex)
         confirmed = None; START_ID['verify'] = {'confirmed': None, 'error': str(ex)[:200]}
     need_relook = (not identity_ok(rt.per0)) or (confirmed is not True)
     if need_relook:
@@ -527,6 +502,7 @@ def start_identity_check():
                                               'reason': vrec2.get('reason')}
             ID_EVENTS.append({'where': 'start_verify_after_relook', **START_ID['verify_after_relook']})
         except Exception as ex:
+            warn('start_verify_after_relook', ex)
             START_ID['verify_after_relook'] = {'confirmed': None, 'error': str(ex)[:200]}
     START_ID['final'] = identity_fields(rt.per0)
     _commit_keypoints(rt.per0, rt.DEP0, 'perceive_start_relook' if START_ID.get('forced_relook') else 'episode_start')

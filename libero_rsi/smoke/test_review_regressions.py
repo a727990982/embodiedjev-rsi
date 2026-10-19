@@ -5,9 +5,12 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -41,6 +44,19 @@ def functions(*names, **bindings):
              if isinstance(node, ast.FunctionDef) and node.name == name]
     assert len(found) == len(names)
     scope = _Scope(json=json, os=__import__('os'))
+    warnings = []
+
+    def warn(where, exc, once=False, **ctx):
+        warnings.append({'where': where, 'error': f'{type(exc).__name__}: {exc}', **ctx})
+
+    @contextmanager
+    def nonfatal(where, **ctx):
+        try:
+            yield
+        except Exception as exc:
+            scope['warn'](where, exc, **ctx)
+
+    dict.update(scope, NONFATAL=warnings, warn=warn, nonfatal=nonfatal)
     dict.__setitem__(scope, 'rt', SimpleNamespace())
     for module in MODULES:
         dict.__setitem__(scope, module, SimpleNamespace())
@@ -240,6 +256,32 @@ class RegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'bad trigger'):
             scope['_apply_recovery_rules']({}, {}, None)
         self.assertEqual(events[0]['recovery_error'], 'broken')
+
+    def test_retreat_lifts_to_clearance_above_numpy_grasp(self):
+        moves = []
+        scope = functions('_retreat_for_global_view', _raise_tcp=lambda scale, max_steps: 0.1,
+                          EP={'closed': False}, PER={'grasp': np.array([0., 0., 0.3]), 'obj_h': 0.05},
+                          eef=lambda: np.array([0., 0., 0.2]),
+                          servo=lambda tgt, *args, **kwargs: moves.append(np.asarray(tgt).copy()), np=np)
+        scope['_retreat_for_global_view']()
+        self.assertEqual(len(moves), 1)
+        self.assertAlmostEqual(float(moves[0][2]), 0.45)
+
+    def test_nonfatal_records_diagnostic_failures_once_when_asked(self):
+        from harness import state
+        state.reset()
+        with state.nonfatal('diag_write', step_kind='test'):
+            raise OSError('disk full')
+        for _ in range(3):
+            state.warn('predicate', ValueError('bad expr'), once=True, name='near_goal')
+        state.warn('predicate', ValueError('bad expr'), once=True, name='other')
+        self.assertEqual([(w['where'], w.get('name')) for w in state.NONFATAL],
+                         [('diag_write', None), ('predicate', 'near_goal'), ('predicate', 'other')])
+        self.assertEqual(state.NONFATAL[0]['error'], 'OSError: disk full')
+        with self.assertRaises(KeyboardInterrupt), state.nonfatal('interrupt'):
+            raise KeyboardInterrupt
+        state.reset()
+        self.assertEqual(state.NONFATAL, [])
 
     def test_all_shipped_libraries_validate(self):
         for path in (ROOT / 'libs').rglob('*.json'):

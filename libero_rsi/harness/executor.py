@@ -8,7 +8,7 @@ import motion_feedback as MF
 
 from . import assist, grasping, observation, pose, recovery, robot, vision
 from .config import ASK_ASTRA_NAMES, CLOSE_NOT_READY, GRASP_FAILED, MAX_RELOOK, MOTION_RECOVERIES, TRANSPORT_INTENTS
-from .state import DONE, EP, GOAL_ID, ID_EVENTS, P, PER, SHAPE, T, log, rt
+from .state import DONE, EP, GOAL_ID, ID_EVENTS, P, PER, SHAPE, T, log, nonfatal, rt, warn
 
 
 def execute(name, ns):
@@ -83,13 +83,11 @@ def execute(name, ns):
         # HARD GATE: after target refresh, do not close while TCP is still over the old place.
         if EP.get('need_reapproach') and not vision._tcp_near_grasp():
             EP['force_next_intent'] = 'move_above_object'
-            try:
+            with nonfatal('close_blocked_log'):
                 log(t=T[0], close_blocked_reapproach=True, reason=EP.get('reapproach_reason'),
                     rev=EP.get('reapproach_rev'), goal_id_confirmed=vision.goal_id_confirmed(),
                     tcp=list(np.asarray(robot.eef(), float).round(4)),
                     grasp=list(np.asarray(PER.get('grasp'), float).round(4)) if 'grasp' in PER else None)
-            except Exception:
-                pass
             ID_EVENTS.append({'where': 'close_blocked_reapproach', 'reason': EP.get('reapproach_reason'),
                               'rev': EP.get('reapproach_rev'), 'goal_id': dict(GOAL_ID)})
             return 'close_blocked_need_reapproach'
@@ -103,11 +101,7 @@ def execute(name, ns):
         EP['tcp_at_close'] = robot.eef(); EP['opening_at_close'] = robot.opening()
         EP['closes'].append({'xyz': [round(float(x), 3) for x in robot.eef()], 'opening_after_close': round(robot.opening(), 4),
                              'both_contact': all(robot.contacts()), 'goal_id_confirmed': True})
-        try:
-            secured, detail = grasping._confirm_grasp_after_close()
-        except Exception as exc:
-            secured = False
-            log(t=T[0], grasp_confirmation_error=True, error_type=type(exc).__name__)
+        secured, _ = grasping._confirm_grasp_after_close()
         if not secured:
             EP['grasp_confirm'] = False
             EP['grasp_secured_once'] = False
@@ -123,13 +117,17 @@ def execute(name, ns):
     if name == 'reopen_and_retry':
         return 'reopened'  # Opening is separate from approaching a potentially stale point.
     try: tgt = np.asarray(dsl.evaluate(it['refpoint'], ns), float).reshape(3)
-    except Exception as e: return 'refpoint_error'
-    def ev(k):
-        try: return float(dsl.evaluate(str(it[k]), ns)) if k in it else None
-        except Exception: return None
-    SHAPE.update(tilt=ev('tilt_deg') or 0.0, tdir=ev('tilt_dir_deg') or 0.0, yaw=ev('yaw_deg'))
-    try: gain = float(dsl.evaluate(str(it.get('gain', '1')), ns))
-    except Exception: gain = 1.0
+    except Exception as e:
+        warn('refpoint', e, intent=name)
+        return 'refpoint_error'
+    def ev(k, default):
+        if k not in it: return default
+        try: return float(dsl.evaluate(str(it[k]), ns))
+        except Exception as e:
+            warn('intent_shape', e, once=True, intent=name, field=k)
+            return default
+    SHAPE.update(tilt=ev('tilt_deg', None) or 0.0, tdir=ev('tilt_dir_deg', None) or 0.0, yaw=ev('yaw_deg', None))
+    gain = ev('gain', 1.0)
     if np.linalg.norm(tgt - robot.eef()) < .006:
         vision._clear_reapproach_if_aligned('at_target')
         return 'at_target'
@@ -155,7 +153,8 @@ def _execute_fine_step(it, ns):
     tcp_now = np.asarray(robot.eef(), float).reshape(3)
     try:
         raw = np.asarray(dsl.evaluate(it['refpoint'], ns), float).reshape(3)
-    except Exception:
+    except Exception as e:
+        warn('refpoint', e, intent=name)
         rep = FS.fine_step_report(name, 'refpoint_error', tcp_now, np.zeros(3), closed_before)
         _remember_fine_step(rep)
         return 'refpoint_error'
@@ -170,7 +169,8 @@ def _execute_fine_step(it, ns):
         # Keep the current approach yaw/tilt (PATCH / RSHAPE / perception). Do not invent a new orientation.
         try:
             gain = float(dsl.evaluate(str(it.get('gain', '1')), ns))
-        except Exception:
+        except Exception as e:
+            warn('intent_shape', e, once=True, intent=name, field='gain')
             gain = 1.0
         grip = 1 if closed_before else -1
         r = robot.servo(tgt, grip, gain, max_steps=FS.FINE_STEP_MAX_STEPS, tol=FS.FINE_STEP_TOL_M)

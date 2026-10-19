@@ -2,6 +2,7 @@
 
 This verifies wiring and result/error handling, NOT LIBERO physics or task success.
 """
+import contextlib
 import json
 import os
 import runpy
@@ -20,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 import coding_agent_slow as CAS
 
 
-def fake_run(destination, fail_start=False, handoff=False, menus=False):
+def fake_run(destination, fail_start=False, handoff=False, menus=False, place_fault=False):
     events = []
     def module(name, **attrs):
         obj = types.ModuleType(name)
@@ -150,9 +151,13 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False):
     def exit_process(code): raise SystemExit(code)
     env = {'HORIZON': '20', 'MAX_DEC': '3', 'GATE_JEV': '0', 'SLOW_MIN_GAP_S': '0', 'VIDEO': ''}
     if menus: env.update(FINE_STEPS='1',POSE_MENU='1',JEV_RECOVERY_MENU='jev',HORIZON='40')
+    with patch.dict(os.environ, env, clear=True):
+        from harness import grasping
+    place_patch = (patch.object(grasping, '_note_place_phase', side_effect=KeyError('injected place-phase failure'))
+                   if place_fault else contextlib.nullcontext())
     with patch.dict(os.environ, env, clear=True), patch.object(CAS, 'call_codex', side_effect=codex), \
          patch.object(sys, 'argv', ['run_ep_fbpatch.py','fake_suite','0','0',str(library),destination]), \
-         patch.object(os, '_exit', side_effect=exit_process):
+         patch.object(os, '_exit', side_effect=exit_process), place_patch:
         try:
             runpy.run_path(str(ROOT/'run_ep_fbpatch.py'), run_name='__main__')
         except SystemExit as ex:
@@ -163,12 +168,13 @@ def fake_run(destination, fail_start=False, handoff=False, menus=False):
 
 
 class RuntimeChainTests(unittest.TestCase):
-    def run_scenario(self, fail_start, handoff=False, menus=False):
+    def run_scenario(self, fail_start, handoff=False, menus=False, place_fault=False):
         with tempfile.TemporaryDirectory() as temp:
             args = [sys.executable, __file__, '--fake-run', temp]
             if menus: args.append('--menus')
             if fail_start: args.append('--fail-start')
             if handoff: args.append('--handoff')
+            if place_fault: args.append('--place-fault')
             run = subprocess.run(args, capture_output=True, text=True, timeout=20)
             result_path = Path(temp)/'fake_suite_t0_i0'/'result.json'
             self.assertTrue(result_path.exists(), run.stdout + run.stderr)
@@ -179,6 +185,7 @@ class RuntimeChainTests(unittest.TestCase):
     def test_entire_entrypoint_with_fake_services(self):
         run, result, events = self.run_scenario(False)
         self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(result['nonfatal_errors'], [])
         self.assertNotEqual(result['end_reason'], 'harness_error', result.get('error'))
         self.assertEqual(events[:3], ['perception', 'identity', 'start_plan'])
         self.assertIn('jev:ask_astra', events)
@@ -199,6 +206,7 @@ class RuntimeChainTests(unittest.TestCase):
     def test_progress_is_committed_before_next_action_and_final_snapshot_is_reviewed(self):
         run, result, events = self.run_scenario(False, handoff=True)
         self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(result['nonfatal_errors'], [])
         self.assertNotEqual(result['end_reason'], 'harness_error', result.get('error'))
         self.assertEqual(self.active_targets, ['cheese', 'butter', 'butter'])
         self.assertEqual(result['task_todo']['active_id'], 'butter')
@@ -213,6 +221,7 @@ class RuntimeChainTests(unittest.TestCase):
     def test_fine_pose_and_jev_control_together_use_current_payload(self):
         run,result,events=self.run_scenario(False,menus=True)
         self.assertEqual(run.returncode,0,run.stderr)
+        self.assertEqual(result['nonfatal_errors'],[])
         self.assertNotEqual(result['end_reason'],'harness_error',result.get('error'))
         self.assertEqual(result['recovery_control'],'jev')
         self.assertTrue(result['fine_steps_enabled'])
@@ -228,8 +237,17 @@ class RuntimeChainTests(unittest.TestCase):
         self.assertFalse(any(e.startswith('jev:') for e in events))
         self.assertEqual(events[-1], 'env_closed')
 
+    def test_place_phase_error_ends_episode_as_harness_error(self):
+        run, result, events = self.run_scenario(False, place_fault=True)
+        self.assertEqual(run.returncode, 1)
+        self.assertEqual(result['end_reason'], 'harness_error')
+        self.assertIn('injected place-phase failure', result['error'])
+        self.assertEqual(result['decisions'], 1)
+        self.assertEqual(events[-1], 'env_closed')
+
 
 if __name__ == '__main__':
     if '--fake-run' in sys.argv:
-        raise SystemExit(fake_run(sys.argv[2], '--fail-start' in sys.argv, '--handoff' in sys.argv, '--menus' in sys.argv))
+        raise SystemExit(fake_run(sys.argv[2], '--fail-start' in sys.argv, '--handoff' in sys.argv, '--menus' in sys.argv,
+                                  '--place-fault' in sys.argv))
     unittest.main()
