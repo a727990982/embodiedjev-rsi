@@ -175,7 +175,7 @@ text-only model. The [TypeSafe image protocol](https://docs.typesafe.ai/images)
 is used for acting, spectator decisions and todo reviews.
 
 Real rollouts also require an authenticated Codex CLI, LIBERO with its assets,
-MuJoCo/robosuite, SciPy, NumPy, Pillow, `ffmpeg` with libx264, and rendering dependencies. `astra_client`
+MuJoCo/robosuite, the packages in `requirements.txt`, `ffmpeg` with libx264, and rendering dependencies. `astra_client`
 and an external `jev_choice` are not needed. After configuring credentials and
 dependencies:
 
@@ -207,17 +207,19 @@ The episode score is `success` in `result.json` (official LIBERO check). Success
 
 ## Smoke tests
 
-From the repo root (Python 3; `numpy` and Pillow for the tests that import them):
+From the repo root, with Python 3:
 
 ```bash
-failed=0
-for t in libero_rsi/smoke/test_*.py; do
-  python "$t" || failed=1
-done
-test "$failed" -eq 0
+pip install -r requirements.txt
+python libero_rsi/smoke/run_all.py
 ```
 
-Each test adds `libero_rsi/` to `sys.path`, so `validate` and `dsl_libero` resolve as siblings. NumPy and Pillow are required for the tests that import them. No simulator and no network.
+`run_all.py` checks for NumPy, Pillow and SciPy first and names any that are
+missing, then runs each `smoke/test_*.py` in its own process and prints the
+output of failing tests (`-v` prints all output). It exits 1 if a test fails
+and 2 if a package is missing. The video test is skipped without `ffmpeg`. A
+single test can also be run directly, e.g. `python libero_rsi/smoke/test_stage_todo.py`.
+No simulator and no network.
 
 The regression suite executes selected production functions with environment/model doubles, covering identity authorization, fixed backend routing and Codex failure handling, event timestamps, async snapshots, diagnostic isolation, recovery failures, and validation of every shipped library. These tests do not establish simulation success.
 

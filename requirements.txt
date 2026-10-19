@@ -1,0 +1,5 @@
+# Offline harness modules and libero_rsi/smoke tests.
+# Rollouts additionally need LIBERO (with its compatible robosuite/MuJoCo), see README.
+numpy>=1.24
+Pillow>=10.0
+scipy>=1.10
